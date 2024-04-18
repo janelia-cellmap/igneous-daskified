@@ -1,0 +1,17 @@
+[project]
+name = "igneous-daskified"
+version = "0.0.1"
+
+requires-python = ">=3.10"
+authors = [
+  {name = "David Ackerman", email = "ackermand@janelia.hhmi.org"},
+]
+maintainers = [
+  {name = "David Ackerman", email = "ackermand@janelia.hhmi.org"},
+]
+description = "Daskifying igneous skeletonization and mesh generation"
+readme = "README.md"
+license = {file = "LICENSE.txt"}
+
+[project.scripts]
+igneous-daskified = "igneous_daskified.process.ci_skeletonize:mainDaskTest"
