@@ -17,7 +17,7 @@ def main():
         "mito",
     )
 
-    from .skeletons import Skeletonize
+    from igneous_daskified.process.skeletons import Skeletonize
 
     sk = Skeletonize(
         ds,
@@ -70,7 +70,7 @@ def mainDaskTest():
                     num_workers=args.num_workers,
                     log_dir="/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/daisy-logs/",
                 )
-                sk.get_chunked_skeletons("/nrs/cellmap/ackermand/tests/tmp/")
+                sk.get_chunked_skeletons("/nrs/cellmap/ackermand/tests/tmp/dask/")
 
 
 if __name__ == "__main__":

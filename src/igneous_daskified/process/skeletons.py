@@ -41,13 +41,14 @@ def get_chunked_skeleton(
         exist_ok=True,
     )
 
-    segmentation_block = segmentation_array.to_ndarray(block.roi, fill_value=0)
+    t0 = time.time()
+    segmentation_block = segmentation_array.to_ndarray(block.roi)
     # raise Exception(dask.config.config)
     # swap byte order in place if little endian
     if segmentation_block.dtype.byteorder == ">":
         segmentation_block = segmentation_block.newbyteorder().byteswap()
+    t1 = time.time()
 
-    t0 = time.time()
     skels = kimimaro.skeletonize(
         segmentation_block,
         teasar_params={
@@ -72,23 +73,21 @@ def get_chunked_skeleton(
         fix_avocados=False,  # default False
         progress=False,  # default False, show progress bar
         parallel=1,  # <= 0 all cpu, 1 single process, 2+ multiprocess
-        parallel_chunk_size=10,  # how many skeletons to process before updating progress bar
-        in_place=True,
+        parallel_chunk_size=100,  # how many skeletons to process before updating progress bar
     )
-    t1 = time.time()
+    t2 = time.time()
     for id, skel in skels.items():
         skel.vertices += block.roi.offset
         os.makedirs(f"{tmpdirname}/{id}", exist_ok=True)
         with open(f"{tmpdirname}/{id}/block_{block.index}.pkl", "wb") as fp:
             pickle.dump(skel, fp)
-
+    t3 = time.time()
     # write elapsed time to file named with blockid
     with open(
         f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daskAttempts/{block.index}",
         "w",
     ) as f:
-        f.write(str(t1 - t0))
-        f.write(str(time.time() - t1))
+        f.write(f"{time.time() - t0},{t1-t0},{t2-t1},{t3-t2}")
 
 
 # encoder for uint64 from https://stackoverflow.com/a/57915246
@@ -117,7 +116,7 @@ class DaskBlock:
 
 
 def create_blocks(roi: Roi, ds: Array, block_size=None):
-    roi = roi.snap_to_grid(ds.chunk_shape * ds.voxel_size)
+    # roi = roi.snap_to_grid(ds.chunk_shape * ds.voxel_size)
     if not block_size:
         block_size = ds.chunk_shape * ds.voxel_size
 
@@ -126,8 +125,11 @@ def create_blocks(roi: Roi, ds: Array, block_size=None):
     for z in range(roi.get_begin()[2], roi.get_end()[2], block_size[2]):
         for y in range(roi.get_begin()[1], roi.get_end()[1], block_size[1]):
             for x in range(roi.get_begin()[0], roi.get_end()[0], block_size[0]):
-                block_rois.append(DaskBlock(index, Roi((x, y, z), block_size)))
+                block_rois.append(
+                    DaskBlock(index, Roi((x, y, z), block_size).intersect(roi))
+                )
                 index += 1
+
     print(len(block_rois))
     return block_rois
 
@@ -172,18 +174,27 @@ class Skeletonize:
         tmpdirname,
     ):
         os.makedirs(
-            "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daisy128",
+            "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daisy",
             exist_ok=True,
         )
+        # os.makedirs(
+        #     "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/rois/daisy",
+        #     exist_ok=True,
+        # )
+        # _, block_id = block.block_id
+        # with open(
+        #     f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/rois/daisy/{block_id}.pkl",
+        #     "wb",
+        # ) as f:
+        #     pickle.dump(block.read_roi, f)
+
         t0 = time.time()
-        segmentation_block = self.segmentation_array.to_ndarray(
-            block.read_roi, fill_value=0
-        )
+        segmentation_block = self.segmentation_array.to_ndarray(block.read_roi)
 
         # # swap byte order in place if little endian
         if segmentation_block.dtype.byteorder == ">":
             segmentation_block = segmentation_block.newbyteorder().byteswap()
-
+        t1 = time.time()
         skels = kimimaro.skeletonize(
             segmentation_block,
             teasar_params={
@@ -210,24 +221,24 @@ class Skeletonize:
             parallel=1,  # <= 0 all cpu, 1 single process, 2+ multiprocess
             parallel_chunk_size=100,  # how many skeletons to process before updating progress bar
         )
-
+        t2 = time.time()
         _, block_id = block.block_id
         for id, skel in skels.items():
             skel.vertices += block.read_roi.offset
             os.makedirs(f"{tmpdirname}/{id}", exist_ok=True)
             with open(f"{tmpdirname}/{id}/block_{block_id}.pkl", "wb") as fp:
                 pickle.dump(skel, fp)
-
+        t3 = time.time()
         with open(
-            f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daisy128/{block_id}",
+            f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daisy/{block_id}",
             "w",
         ) as f:
-            f.write(str(time.time() - t0))
+            f.write(f"{time.time() - t0},{t1-t0},{t2-t1},{t3-t2}")
 
     # @dask.delayed
     def __get_chunked_skeleton(
         self,
-        block: DaskBlock,
+        block,
         tmpdirname,
     ):
         os.makedirs(
@@ -235,7 +246,7 @@ class Skeletonize:
             exist_ok=True,
         )
         t0 = time.time()
-        segmentation_block = self.segmentation_array.to_ndarray(block.roi, fill_value=0)
+        segmentation_block = self.segmentation_array.to_ndarray(block.roi)
         # raise Exception(dask.config.config)
         # swap byte order in place if little endian
         if segmentation_block.dtype.byteorder == ">":
@@ -266,7 +277,6 @@ class Skeletonize:
             progress=False,  # default False, show progress bar
             parallel=1,  # <= 0 all cpu, 1 single process, 2+ multiprocess
             parallel_chunk_size=100,  # how many skeletons to process before updating progress bar
-            in_place=True,
         )
 
         for id, skel in skels.items():
@@ -311,9 +321,8 @@ class Skeletonize:
         lazy_results = []
         for block in blocks:
             lazy_results.append(
-                dask.delayed(get_chunked_skeleton)(
-                    self.segmentation_array, block, dirname
-                )
+                # dask.delayed(get_chunked_skeleton)(
+                dask.delayed(self.get_chunked_skeleton_dask)(block, dirname)
             )
         # client.rebalance()
         dask.compute(*lazy_results)
@@ -428,7 +437,7 @@ class Skeletonize:
         os.makedirs(self.output_directory, exist_ok=True)
         """Get the skeletons using daisy and dask save them to disk in a temporary directory"""
         with tempfile.TemporaryDirectory() as tmpdirname:
-            tupdupname = "/nrs/cellmap/ackermand/tests/tmp/"
+            tupdupname = "/nrs/cellmap/ackermand/tests/tmp/daisy/"
             task = daisy.Task(
                 total_roi=self.total_roi,
                 read_roi=self.read_write_roi,
@@ -443,5 +452,94 @@ class Skeletonize:
             )
             # add export of scores
             daisy.run_blockwise([task])
+            # self.get_chunked_skeletons(tupdupname)
+            # self.process_chunked_skeletons(tupdupname)
+
+    def get_chunked_skeleton_dask(
+        self,
+        block,  #: DaskBlock,
+        tmpdirname,
+    ):
+        os.makedirs(
+            "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daskAttempts",
+            exist_ok=True,
+        )
+
+        t0 = time.time()
+        segmentation_block = self.segmentation_array.to_ndarray(block.roi)
+        # raise Exception(dask.config.config)
+        # swap byte order in place if little endian
+        if segmentation_block.dtype.byteorder == ">":
+            segmentation_block = segmentation_block.newbyteorder().byteswap()
+        t1 = time.time()
+
+        skels = kimimaro.skeletonize(
+            segmentation_block,
+            teasar_params={
+                "scale": 1.5,
+                "const": 300,  # physical units
+                "pdrf_scale": 100000,
+                "pdrf_exponent": 4,
+                "soma_acceptance_threshold": 3500,  # physical units
+                "soma_detection_threshold": 750,  # physical units
+                "soma_invalidation_const": 300,  # physical units
+                "soma_invalidation_scale": 2,
+                "max_paths": 300,  # default None
+            },
+            # object_ids=[ ... ], # process only the specified labels
+            # extra_targets_before=[ (27,33,100), (44,45,46) ], # target points in voxels
+            # extra_targets_after=[ (27,33,100), (44,45,46) ], # target points in voxels
+            dust_threshold=0,  # skip connected components with fewer than this many voxels
+            anisotropy=(8, 8, 8),  # default True
+            fix_branching=True,  # default True
+            fix_borders=True,  # default True
+            fill_holes=False,  # default False
+            fix_avocados=False,  # default False
+            progress=False,  # default False, show progress bar
+            parallel=1,  # <= 0 all cpu, 1 single process, 2+ multiprocess
+            parallel_chunk_size=100,  # how many skeletons to process before updating progress bar
+        )
+        t2 = time.time()
+        for id, skel in skels.items():
+            skel.vertices += block.roi.offset
+            os.makedirs(f"{tmpdirname}/{id}", exist_ok=True)
+            with open(f"{tmpdirname}/{id}/block_{block.index}.pkl", "wb") as fp:
+                pickle.dump(skel, fp)
+        t3 = time.time()
+        # write elapsed time to file named with blockid
+        with open(
+            f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daskAttempts/{block.index}",
+            "w",
+        ) as f:
+            f.write(f"{time.time() - t0},{t1-t0},{t2-t1},{t3-t2}")
+
+    def get_skeletons(self):
+        os.makedirs(self.output_directory, exist_ok=True)
+        """Get the skeletons using daisy and dask save them to disk in a temporary directory"""
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            tupdupname = "/nrs/cellmap/ackermand/tests/tmp/daisy/"
+            task = daisy.Task(
+                total_roi=self.total_roi,
+                read_roi=self.read_write_roi,
+                write_roi=self.read_write_roi,
+                process_function=lambda b: self.__get_chunked_skeleton_daisy(
+                    b,
+                    tupdupname,  # tmpdirname
+                ),
+                num_workers=self.num_workers,
+                task_id="block_processing",
+                fit="shrink",
+            )
+            # add export of scores
+            daisy.run_blockwise([task])
+            # self.get_chunked_skeletons(tupdupname)
+            # self.process_chunked_skeletons(tupdupname)
+
+    def get_skeletons_dask(self):
+        os.makedirs(self.output_directory, exist_ok=True)
+        """Get the skeletons using daisy and dask save them to disk in a temporary directory"""
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            tupdupname = "/nrs/cellmap/ackermand/tests/tmp/dask/"
+            self.get_chunked_skeleton_dask(tupdupname)
             # self.get_chunked_skeletons(tupdupname)
             # self.process_chunked_skeletons(tupdupname)
