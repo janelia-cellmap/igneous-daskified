@@ -26,11 +26,11 @@ from zmesh import Mesher, Mesh
 from kimimaro.postprocess import remove_ticks, connect_pieces
 import fastremap
 import pandas as pd
-from igneous_daskified.util import dask_util, io_util
+from igneous_daskified.util import dask_util, io_util, neuroglancer_util
 import dask.bag as db
 import networkx as nx
+import dask.dataframe as dd
 from neuroglancer.skeleton import VertexAttributeInfo
-
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -512,31 +512,14 @@ class Skeletonize:
     def get_all_skeleton_information(self, df):
         results_df = []
         for row in df.itertuples():
-            _, _, max_distance = self.get_longest_shortest_path_distance(row.id)
-            com_x, com_y, com_z = self.get_com(row.id)
+            _, _, max_distance = self.get_longest_shortest_path_distance(str(row.id))
             result_df = pd.DataFrame(
                 {
                     "id": [row.id],
-                    "COM X (nm)": [com_x],
-                    "COM Y (nm)": [com_y],
-                    "COM Z (nm)": [com_z],
-                    "lsp": [max_distance],
-                    "cell": [cell_id],
-                }
-            )
-
-    def get_longest_shortest_path_distance_df(self, df):
-        results_df = []
-
-        for row in df.itertuples():
-            _, _, max_distance = self.get_longest_shortest_path_distance(row.id)
-
-            result_df = pd.DataFrame(
-                {
-                    "id": [row.id],
-                    "COM X (nm)": [0.0],
-                    "COM Y (nm)": [0.0],
-                    "COM Z (nm)": [0.0],
+                    "cell": [row.cell],
+                    "com_x_nm": [row.com_x_nm],
+                    "com_y_nm": [row.com_y_nm],
+                    "com_z_nm": [row.com_z_nm],
                     "lsp": [max_distance],
                 }
             )
@@ -636,11 +619,6 @@ class Skeletonize:
         all_cells = np.unique(cells)
         self.all_cells = all_cells[all_cells > 0].tolist()
 
-        self.__write_skeleton_metadata(
-            all_cells,
-            grouped_by_cells=True,
-        )
-
     def group_skeletons_by_cells(self):
         self.assign_mitos_to_cells()
         self.__write_skeleton_metadata(
@@ -654,6 +632,51 @@ class Skeletonize:
             with io_util.Timing_Messager("Grouping skeletons with cells", logger):
                 b.compute()
 
+    def assign_skeleton_info_to_com(self):
+        def write_skeletons_as_points(results):
+            ids = results["id"].to_numpy()
+            coords = results[["com_x_nm", "com_y_nm", "com_z_nm"]].to_numpy()
+            properties_dict = {"lsp": results["lsp"].to_numpy()}
+
+            cell_grouping = results.groupby(["cell"]).indices
+            relationships_dict = {
+                cell_id: corresponding_indices
+                for cell_id, corresponding_indices in cell_grouping.items()
+            }
+            output_directory = self.output_directory + "_as_points"
+            neuroglancer_util.write_precomputed_annotations(
+                output_directory=output_directory,
+                annotation_type="point",
+                ids=ids,
+                coords=coords,
+                properties_dict=properties_dict,
+                relationships_dict=relationships_dict,
+            )
+
+        self.assign_mitos_to_cells()
+        df = pd.DataFrame(
+            {
+                "id": self.mito_ids,
+                "cell": self.mito_to_cell_ids,
+                "com_x_nm": self.mito_coms[:, 0],
+                "com_y_nm": self.mito_coms[:, 1],
+                "com_z_nm": self.mito_coms[:, 2],
+                "lsp": [-1.0] * len(self.mito_ids),
+            }
+        )
+
+        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
+
+        meta = pd.DataFrame(columns=df.columns)
+        ddf_out = ddf.map_partitions(self.get_all_skeleton_information, meta=meta)
+        with dask_util.start_dask(self.num_workers, "skeletons by com", logger):
+            with io_util.Timing_Messager(
+                "Grouping skeletons with cells, by com", logger
+            ):
+                results = ddf_out.compute()
+
+        write_skeletons_as_points(results)
+
     def get_skeletons(self):
         """Get the skeletons using daisy and dask save them to disk in a temporary directory"""
         os.makedirs(self.output_directory, exist_ok=True)
@@ -662,12 +685,13 @@ class Skeletonize:
             # self.source = Source()
             # self.get_chunked_skeletons(tupdupname)
             # self.process_chunked_skeletons(tupdupname)
-            self.source = Source(
-                vertex_attributes={
-                    "lsp": VertexAttributeInfo(data_type=np.float32, num_components=1)
-                }
-            )
-            self.group_skeletons_by_cells()
+            # self.source = Source(
+            #     vertex_attributes={
+            #         "lsp": VertexAttributeInfo(data_type=np.float32, num_components=1)
+            #     }
+            # )
+            # self.group_skeletons_by_cells()
+            self.assign_skeleton_info_to_com()
 
     def get_meshes(self):
         """Get the meshes using dask save them to disk in a temporary directory"""
