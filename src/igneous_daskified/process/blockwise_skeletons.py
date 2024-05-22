@@ -40,85 +40,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def unpack_and_remove(datatype, num_elements, file_content):
-    """Read and remove bytes from binary file object
-
-    Args:
-        datatype: Type of data
-        num_elements: Number of datatype elements to read
-        file_content: Binary file object
-
-    Returns:
-        output: The data that was unpacked
-        file_content: The file contents with the unpacked data removed
-    """
-
-    datatype = datatype * num_elements
-    output = struct.unpack(datatype, file_content[0 : 4 * num_elements])
-    file_content = file_content[4 * num_elements :]
-    if num_elements == 1:
-        return output[0], file_content
-    else:
-        return np.array(output), file_content
-
-
-# encoder for uint64 from https://stackoverflow.com/a/57915246
-class NpEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NpEncoder, self).default(obj)
-
-
-@dataclass
-class Source:
-    """Source for the NeuroglancerSkeleton"""
-    def __init__(self, vertex_attributes=[]):
-        self.vertex_attributes = vertex_attributes
-
-
-@dataclass
-class DaskBlock:
-    index: int
-    roi: Roi
-
-
-def create_blocks(
-    roi: Roi,
-    ds: Array,
-    block_size=None,
-    padding=None,
-):
-    with io_util.Timing_Messager("Generating blocks", logger):
-        # roi = roi.snap_to_grid(ds.chunk_shape * ds.voxel_size)
-        if not block_size:
-            block_size = ds.chunk_shape * ds.voxel_size
-
-        num_expected_blocks = int(
-            np.prod(
-                [np.ceil(roi.shape[i] / block_size[i]) for i in range(len(block_size))]
-            )
-        )
-        # create an empty list with num_expected_blocks elements
-        block_rois = [None] * num_expected_blocks
-        index = 0
-        for z in range(roi.get_begin()[2], roi.get_end()[2], block_size[2]):
-            for y in range(roi.get_begin()[1], roi.get_end()[1], block_size[1]):
-                for x in range(roi.get_begin()[0], roi.get_end()[0], block_size[0]):
-                    block_roi = Roi((x, y, z), block_size).intersect(roi)
-                    if padding:
-                        block_roi = block_roi.grow(padding, padding)
-                    block_rois[index] = DaskBlock(index, block_roi.intersect(roi))
-                    index += 1
-        if index < len(block_rois):
-            block_rois[index:] = []
-    return block_rois
-
-
 class Skeletonize:
     """Skeletonize a segmentation array using kimimaro and dask"""
 
@@ -184,11 +105,11 @@ class Skeletonize:
                 fp.write(mesh.to_obj())
 
     def get_chunked_meshes(self, dirname):
-        blocks = create_blocks(
+        blocks = dask_util.create_blocks(
             self.total_roi,
             self.segmentation_array,
             self.read_write_roi.shape,
-            # self.segmentation_array.voxel_size,
+            self.segmentation_array.voxel_size,
         )
 
         lazy_results = [None] * len(blocks)
@@ -201,7 +122,7 @@ class Skeletonize:
 
     def get_chunked_skeletons(self, dirname):
         self.dirname = dirname
-        blocks = create_blocks(
+        blocks = dask_util.create_blocks(
             self.total_roi,
             self.segmentation_array,
             self.read_write_roi.shape,
@@ -682,10 +603,10 @@ class Skeletonize:
         os.makedirs(self.output_directory, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmpdirname:
             tupdupname = "/nrs/cellmap/ackermand/tests/AubreyPresentation20240502/848UpdateTesar/skeletons"  # WithCorrectOverlap"  # "/nrs/cellmap/ackermand/tests/20240430/skeleton5/"  # "/nrs/cellmap/ackermand/tests/AubreyPresentation20240502/20240501/skeletons"  # AubreyPresentation20240502/20240501/skeletons "/nrs/cellmap/ackermand/tests/20240430/skeleton3/"
-            # self.source = Source()
+            # self.source = neuroglancer_util.Source()
             # self.get_chunked_skeletons(tupdupname)
             # self.process_chunked_skeletons(tupdupname)
-            # self.source = Source(
+            # self.source = neuroglancer_util.Source(
             #     vertex_attributes={
             #         "lsp": VertexAttributeInfo(data_type=np.float32, num_components=1)
             #     }
