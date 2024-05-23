@@ -26,16 +26,6 @@ typedef Skeleton::vertex_descriptor                           Skeleton_vertex;
 typedef Skeleton::edge_descriptor                             Skeleton_edge;
 //only needed for the display of the skeleton as maximal polylines
 
-//function that takes in Skeleton_vertex and adds it to map if it doesnt exist
-int add_vertex_to_map(Skeleton_vertex v, std::map<Skeleton_vertex, int>& vertex_index_map)
-{
-  if (vertex_index_map.find(v) == vertex_index_map.end())
-  {
-    vertex_index_map[v] = vertex_index_map.size();
-  }
-  // return the index of the vertex
-  return vertex_index_map[v];
-}
 
 // This example extracts a medially centered skeleton from a given mesh.
 
@@ -64,33 +54,58 @@ int main(int argc, char* argv[])
     std::cout << "Error: the skeleton is too small for " << argv[1] << std::endl;
     return EXIT_FAILURE;
   }
-  std::ofstream output(argv[2]);
 
-  // create hashmap of Skeleton_vertex to index
-  std::map<Skeleton_vertex, int> vertex_index_map;
+
+  //  Output skeleton points and the corresponding surface points
+  std::ofstream output(argv[2]);
+  // assign indices to vertices
+  for(Skeleton_vertex v : CGAL::make_range(vertices(skeleton))){
+    Point_3 skeleton_vertex = skeleton[v].point;
+    float average_radius, radius = 0;
+    if (skeleton[v].vertices.size() == 0)
+      {// some vertices aren't associated with mesh vertices but we still want to calculate a radius for them
+        float min_radius = std::numeric_limits<float>::max();
+        //loop over all vertices of mesh and find the minimum distance between the skeleton vertex and the mesh vertices
+        for(vertex_descriptor mesh_vd : vertices(mesh)){
+          Point_3 mesh_vertex = get(CGAL::vertex_point, mesh, mesh_vd);
+          radius = std::sqrt(CGAL::squared_distance(mesh_vertex, skeleton_vertex));
+          if(radius < min_radius)
+            min_radius = radius;
+        }
+        average_radius = min_radius;
+      }
+      else{
+        // get the average associated vertex distance
+        for(vertex_descriptor vd : skeleton[v].vertices){
+          Point_3 associated_mesh_vertex = get(CGAL::vertex_point, mesh, vd);
+          average_radius += std::sqrt(CGAL::squared_distance(associated_mesh_vertex, skeleton_vertex));
+        }
+        average_radius /= skeleton[v].vertices.size();
+      }
+      output << "v " << skeleton[v].point << " " << average_radius << "\n" ;
+  }
+
   for(Skeleton_edge e : CGAL::make_range(edges(skeleton)))
   {
     Skeleton_vertex source_vertex = source(e, skeleton);
     Skeleton_vertex target_vertex = target(e, skeleton);
-    int source_id = add_vertex_to_map(source_vertex, vertex_index_map);
-    int target_id = add_vertex_to_map(target_vertex, vertex_index_map);
 
-    const Point_3& source_point = skeleton[source(e, skeleton)].point;
-    const Point_3& target_point = skeleton[target(e, skeleton)].point;
+    output << "e " << source_vertex << " " << target_vertex << "\n";
 
-    output << source_point << " " << target_point << "\n";
   }
+
+
   output.close();
 
-  //  Output skeleton points and the corresponding surface points
-  output.open("correspondance-poly.polylines.txt");
-  for(Skeleton_vertex v : CGAL::make_range(vertices(skeleton)))
-    for(vertex_descriptor vd : skeleton[v].vertices)
-      output << "2 " << skeleton[v].point << " "
-                     << get(CGAL::vertex_point, mesh, vd)  << "\n";
+  // //  Output skeleton points and the corresponding surface points
+  // output.open("correspondance-poly.polylines.txt");
+  // for(Skeleton_vertex v : CGAL::make_range(vertices(skeleton)))
+  //   for(vertex_descriptor vd : skeleton[v].vertices)
+  //     output << "2 " << skeleton[v].point << " "
+  //                    << get(CGAL::vertex_point, mesh, vd)  << "\n";
 
-  std::cout << "Number of vertices of the skeleton: " << boost::num_vertices(skeleton) << "\n";
-  std::cout << "Number of edges of the skeleton: " << boost::num_edges(skeleton) << "\n";
+  // std::cout << "Number of vertices of the skeleton: " << boost::num_vertices(skeleton) << "\n";
+  // std::cout << "Number of edges of the skeleton: " << boost::num_edges(skeleton) << "\n";
 
 
   std::cout << "Success in writing the skeleton to " << argv[2] << std::endl;
