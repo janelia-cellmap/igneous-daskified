@@ -227,51 +227,6 @@ class Skeletonize:
         return cloudvolume_skeleton
 
     @staticmethod
-    def split(skeleton):
-        # based on chatgpt
-        neighbors_dict = {}
-        for edge in skeleton.edges:
-            neighbors_dict[edge[0]] = neighbors_dict.get(edge[0], []) + [edge[1]]
-            neighbors_dict[edge[1]] = neighbors_dict.get(edge[1], []) + [edge[0]]
-
-        split_points = [
-            vertex_idx
-            for vertex_idx in neighbors_dict.keys()
-            if len(neighbors_dict[vertex_idx]) > 2
-        ]
-
-        if not split_points:
-            return skeleton
-
-        def dfs(v, visited, skeleton):
-            stack = [v]
-            while stack:
-                node = stack.pop()
-                if node not in visited:
-                    visited.add(node)
-                    skeleton.add_vertex(node)
-                    for neighbor in neighbors_dict[node]:
-                        if neighbor not in visited:
-                            if (node, neighbor) in skeleton.edges:
-                                skeleton.add_edge(node, neighbor)
-                            else:
-                                skeleton.add_edge(neighbor, node)
-
-                            if neighbor not in split_points:
-                                stack.append(neighbor)
-
-        visited = set()
-        new_skeletons = []
-
-        for vertex in skeleton.vertices:
-            if vertex not in visited:
-                new_skeleton = Skeleton()
-                dfs(vertex, visited, new_skeleton)
-                new_skeletons.append(new_skeleton)
-
-        return new_skeletons
-
-    @staticmethod
     def simplify_cloudvolume_skeleton(cloudvolume_skeleton, tick_threshold=None):
         # to simplify skeletons: https://github.com/navis-org/skeletor/issues/38#issuecomment-1491714639
         n = navis.TreeNeuron(cloudvolume_skeleton.to_swc(), soma=None)
