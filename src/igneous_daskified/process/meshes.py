@@ -35,6 +35,7 @@ from neuroglancer.skeleton import VertexAttributeInfo
 import pyvista as pv
 import pymeshfix
 import shutil
+import pymeshlab
 
 import trimesh
 
@@ -173,74 +174,55 @@ class Meshify:
         return mesh
 
     def _analyze_mesh(mesh):
-
+        mesh = trimesh.load_mesh(
+            "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/10473/concatenated_simplified_99.ply"
+        )
         ms = pymeshlab.MeshSet()
-        m = pymeshlab.Mesh(all_vertices, all_faces)
+        m = pymeshlab.Mesh(mesh.vertices, mesh.faces)
         ms.add_mesh(m)
-        ms.meshing_remove_duplicate_vertices()
-        ms.meshing_remove_duplicate_faces()
-        ms.meshing_repair_non_manifold_edges(
-            method="Remove Faces"
-        )  # sometimes this still has nonmanifold vertices
-        ms.meshing_remove_connected_component_by_face_number(mincomponentsize=4)
+        # ms.meshing_remove_duplicate_vertices()
+        # ms.meshing_remove_duplicate_faces()
+        # ms.meshing_repair_non_manifold_edges(
+        #     method="Remove Faces"
+        # )  # sometimes this still has nonmanifold vertices
+        # ms.meshing_remove_connected_component_by_face_number(mincomponentsize=4)
 
-        try:
-            measures = ms.apply_filter("get_topological_measures")
-            boundary_edges_prev = np.Inf
-            while 0 < measures["boundary_edges"] < boundary_edges_prev:
-                boundary_edges_prev = measures["boundary_edges"]
-                ms.meshing_close_holes(maxholesize=measures["boundary_edges"] + 1)
-                measures = ms.apply_filter("get_topological_measures")
-        except Exception as e:
-            raise (e)
+        # try:
+        #     measures = ms.apply_filter("get_topological_measures")
+        #     boundary_edges_prev = np.Inf
+        #     while 0 < measures["boundary_edges"] < boundary_edges_prev:
+        #         boundary_edges_prev = measures["boundary_edges"]
+        #         ms.meshing_close_holes(maxholesize=measures["boundary_edges"] + 1)
+        #         measures = ms.apply_filter("get_topological_measures")
+        # except Exception as e:
+        #     raise Exception(f"Error in closing holes for: {e}")
 
         # calculate gneral mesh properties
         metrics = {"id": id}
         metrics["volume"] = mesh.volume
         metrics["surface_area"] = mesh.area
         pic = mesh.principal_inertia_components
-        pic_normalized = pic / np.sum(pic)
+        pic_normalized = pic / np.linalg.norm(pic)
         _, ob = trimesh.bounds.oriented_bounds(mesh)
-        ob_normalized = ob / np.sum(ob)
+        ob_normalized = ob / np.linalg.norm(ob)
         for axis in range(3):
             metrics[f"pic_{axis}"] = pic[axis]
             metrics[f"pic_normalized_{axis}"] = pic_normalized[axis]
             metrics[f"ob_{axis}"] = ob[axis]
             metrics[f"ob_normalized_{axis}"] = ob_normalized[axis]
 
-        # mesh = mesh.process()
-        vdisplay = Xvfb()
-        vdisplay.start()
-
-        try:
-            ms.meshing_repair_non_manifold_edges()
-            ms.meshing_repair_non_manifold_edges()
-            for idx, metric in enumerate(["mean", "gaussian", "rms", "abs"]):
-                ms.compute_scalar_by_discrete_curvature_per_vertex(curvaturetype=idx)
-                vsa = ms.current_mesh().vertex_scalar_array()
-                metrics[f"{metric}_curvature_mean"] = np.nanmean(vsa)
-                metrics[f"{metric}_curvature_median"] = np.nanmedian(vsa)
-                metrics[f"{metric}_curvature_std"] = np.nanstd(vsa)
-
-            ms.compute_scalar_by_shape_diameter_function_per_vertex(
-                numberrays=self.numberrays
-            )
+        for idx, metric in enumerate(["mean", "gaussian", "rms", "abs"]):
+            ms.compute_scalar_by_discrete_curvature_per_vertex(curvaturetype=idx)
             vsa = ms.current_mesh().vertex_scalar_array()
-            metrics["thickness_mean"] = np.nanmean(vsa)
-            metrics["thickness_median"] = np.nanmedian(vsa)
-            metrics["thickness_std"] = np.nanstd(vsa)
+            metrics[f"{metric}_curvature_mean"] = np.nanmean(vsa)
+            metrics[f"{metric}_curvature_median"] = np.nanmedian(vsa)
+            metrics[f"{metric}_curvature_std"] = np.nanstd(vsa)
 
-            # # center of each subdivided face offset inwards
-            # points = mesh.triangles_center + (mesh.face_normals * -1e-4)
-            # # use the original mesh for thickness as it is well constructed
-            # metrics["thickness"] = np.nanmean(
-            #     trimesh.proximity.thickness(mesh=mesh, points=points)
-            # )
-        except:
-            ms.save_current_mesh(f"{id}.ply")
-            raise Exception(f"failed {id}")
-        finally:
-            vdisplay.stop()
+        ms.compute_scalar_by_shape_diameter_function_per_vertex()
+        vsa = ms.current_mesh().vertex_scalar_array()
+        metrics["thickness_mean"] = np.nanmean(vsa)
+        metrics["thickness_median"] = np.nanmedian(vsa)
+        metrics["thickness_std"] = np.nanstd(vsa)
 
     def _assemble_mesh(self, mesh_id):
         block_meshes = []
