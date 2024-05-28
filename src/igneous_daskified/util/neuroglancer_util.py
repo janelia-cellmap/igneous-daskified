@@ -8,6 +8,28 @@ from datetime import datetime
 import pandas as pd
 from tqdm import tqdm
 from scipy import spatial
+import numpy as np
+
+def unpack_and_remove(datatype, num_elements, file_content):
+    """Read and remove bytes from binary file object
+
+    Args:
+        datatype: Type of data
+        num_elements: Number of datatype elements to read
+        file_content: Binary file object
+
+    Returns:
+        output: The data that was unpacked
+        file_content: The file contents with the unpacked data removed
+    """
+
+    datatype = datatype * num_elements
+    output = struct.unpack(datatype, file_content[0 : 4 * num_elements])
+    file_content = file_content[4 * num_elements :]
+    if num_elements == 1:
+        return output[0], file_content
+    else:
+        return np.array(output), file_content
 
 
 def write_precomputed_annotations(
