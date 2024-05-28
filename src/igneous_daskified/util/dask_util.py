@@ -9,6 +9,56 @@ from .io_util import Timing_Messager, print_with_datetime
 from datetime import datetime
 import yaml
 from yaml.loader import SafeLoader
+from dataclasses import dataclass
+from funlib.persistence import Array
+from funlib.geometry import Roi
+import numpy as np
+import logging
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    level=logging.INFO,
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DaskBlock:
+    index: int
+    roi: Roi
+
+
+def create_blocks(
+    roi: Roi,
+    ds: Array,
+    block_size=None,
+    padding=None,
+):
+    with Timing_Messager("Generating blocks", logger):
+        # roi = roi.snap_to_grid(ds.chunk_shape * ds.voxel_size)
+        if not block_size:
+            block_size = ds.chunk_shape * ds.voxel_size
+
+        num_expected_blocks = int(
+            np.prod(
+                [np.ceil(roi.shape[i] / block_size[i]) for i in range(len(block_size))]
+            )
+        )
+        # create an empty list with num_expected_blocks elements
+        block_rois = [None] * num_expected_blocks
+        index = 0
+        for z in range(roi.get_begin()[2], roi.get_end()[2], block_size[2]):
+            for y in range(roi.get_begin()[1], roi.get_end()[1], block_size[1]):
+                for x in range(roi.get_begin()[0], roi.get_end()[0], block_size[0]):
+                    block_roi = Roi((x, y, z), block_size).intersect(roi)
+                    if padding:
+                        block_roi = block_roi.grow(padding, padding)
+                    block_rois[index] = DaskBlock(index, block_roi.intersect(roi))
+                    index += 1
+        if index < len(block_rois):
+            block_rois[index:] = []
+    return block_rois
 
 
 def set_local_directory(cluster_type):
@@ -76,7 +126,9 @@ def start_dask(num_workers, msg, logger):
     if cluster_type == "local":
         from dask.distributed import LocalCluster
 
-        cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1)
+        cluster = LocalCluster(
+            n_workers=num_workers, threads_per_worker=1, host="0.0.0.0"
+        )
     else:
         if cluster_type == "lsf":
             from dask_jobqueue import LSFCluster
