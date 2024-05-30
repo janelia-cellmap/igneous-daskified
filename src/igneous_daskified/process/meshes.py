@@ -35,6 +35,12 @@ from neuroglancer.skeleton import VertexAttributeInfo
 import pyvista as pv
 import pymeshfix
 import shutil
+
+# prepend ld_library_path with path to pymeshlab shared libraries
+os.environ["LD_LIBRARY_PATH"] = "/usr/local/lib:" + os.environ.get(
+    "LD_LIBRARY_PATH", ""
+)
+
 import pymeshlab
 
 import trimesh
@@ -77,6 +83,7 @@ class Meshify:
                 * self.segmentation_array.voxel_size,
             )
 
+        self.voxel_size = segmentation_array.voxel_size
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
             daisy.logging.set_log_basedir(log_dir)
@@ -99,7 +106,7 @@ class Meshify:
         return CloudVolumeMesh(vertices, faces, normals)
 
     def _get_chunked_mesh(self, block, tmpdirname):
-        mesher = Mesher((8, 8, 8))  # anisotropy of image
+        mesher = Mesher(self.voxel_size)  # anisotropy of image
         segmentation_block = self.segmentation_array.to_ndarray(block.roi)
         if segmentation_block.dtype.byteorder == ">":
             segmentation_block = segmentation_block.newbyteorder().byteswap()
@@ -130,9 +137,8 @@ class Meshify:
             with io_util.Timing_Messager("Generating chunked meshes", logger):
                 b.compute()
 
-    def _simplify_and_smooth_mesh(
-        self, mesh, target_reduction=0.99, n_smoothing_iter=20
-    ):
+    @staticmethod
+    def simplify_and_smooth_mesh(mesh, target_reduction=0.99, n_smoothing_iter=10):
         components = mesh.split()
 
         if len(components) > 0:
@@ -155,11 +161,11 @@ class Meshify:
         mesh = pv.PolyData(vertices, faces[:])
 
         # simplify mesh
-        mesh = fast_simplification.simplify_mesh(
-            mesh, target_reduction=target_reduction
-        )
+        min_faces = 100
+        if mesh.n_faces > min_faces:
+            target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
+            mesh = fast_simplification.simplify_mesh(mesh, target_count=target_count)
 
-        # smooth mesh
         mesh = mesh.smooth_taubin(n_smoothing_iter)
 
         # clean mesh, this helps ensure watertightness, but not guaranteed?
@@ -170,33 +176,26 @@ class Meshify:
 
         vclean += com
         mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
-
+        mesh.fix_normals()
         return mesh
 
-    def _analyze_mesh(mesh):
-        mesh = trimesh.load_mesh(
-            "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/10473/concatenated_simplified_99.ply"
-        )
-        ms = pymeshlab.MeshSet()
-        m = pymeshlab.Mesh(mesh.vertices, mesh.faces)
-        ms.add_mesh(m)
-        # ms.meshing_remove_duplicate_vertices()
-        # ms.meshing_remove_duplicate_faces()
-        # ms.meshing_repair_non_manifold_edges(
-        #     method="Remove Faces"
-        # )  # sometimes this still has nonmanifold vertices
-        # ms.meshing_remove_connected_component_by_face_number(mincomponentsize=4)
+    def analyze_mesh_df(self, df):
+        results_df = []
+        for row in df.itertuples():
+            try:
+                metrics = Meshify.analyze_mesh(f"{self.output_directory}/{row.id}")
+            except Exception as e:
+                raise Exception(f"Error analyzing mesh {row.id}: {e}")
+            result_df = pd.DataFrame(metrics, index=[0])
+            results_df.append(result_df)
 
-        # try:
-        #     measures = ms.apply_filter("get_topological_measures")
-        #     boundary_edges_prev = np.Inf
-        #     while 0 < measures["boundary_edges"] < boundary_edges_prev:
-        #         boundary_edges_prev = measures["boundary_edges"]
-        #         ms.meshing_close_holes(maxholesize=measures["boundary_edges"] + 1)
-        #         measures = ms.apply_filter("get_topological_measures")
-        # except Exception as e:
-        #     raise Exception(f"Error in closing holes for: {e}")
+        results_df = pd.concat(results_df, ignore_index=True)
+        return results_df
 
+    @staticmethod
+    def analyze_mesh(mesh_path):
+        id = os.path.basename(mesh_path).split(".")[0]
+        mesh = trimesh.load_mesh(mesh_path)
         # calculate gneral mesh properties
         metrics = {"id": id}
         metrics["volume"] = mesh.volume
@@ -211,18 +210,65 @@ class Meshify:
             metrics[f"ob_{axis}"] = ob[axis]
             metrics[f"ob_normalized_{axis}"] = ob_normalized[axis]
 
+        ms = pymeshlab.MeshSet()
+        m = pymeshlab.Mesh(mesh.vertices, mesh.faces)
+        ms.add_mesh(m)
         for idx, metric in enumerate(["mean", "gaussian", "rms", "abs"]):
             ms.compute_scalar_by_discrete_curvature_per_vertex(curvaturetype=idx)
             vsa = ms.current_mesh().vertex_scalar_array()
+            if np.isnan(vsa).all():
+                raise Exception(f"Mesh {id} has no curvature")
             metrics[f"{metric}_curvature_mean"] = np.nanmean(vsa)
             metrics[f"{metric}_curvature_median"] = np.nanmedian(vsa)
             metrics[f"{metric}_curvature_std"] = np.nanstd(vsa)
 
         ms.compute_scalar_by_shape_diameter_function_per_vertex()
         vsa = ms.current_mesh().vertex_scalar_array()
+        if np.isnan(vsa).all():
+            raise Exception(f"Mesh {id} has no thickness")
         metrics["thickness_mean"] = np.nanmean(vsa)
         metrics["thickness_median"] = np.nanmedian(vsa)
         metrics["thickness_std"] = np.nanstd(vsa)
+
+        return metrics
+
+    def analyze_meshes(self, dirname):
+        mesh_ids = os.listdir(dirname)
+
+        metrics = ["volume", "surface_area"]
+        for axis in range(3):
+            metrics.append(f"pic_{axis}")
+            metrics.append(f"pic_normalized_{axis}")
+            metrics.append(f"ob_{axis}")
+            metrics.append(f"ob_normalized_{axis}")
+
+        for metric in [
+            "mean_curvature",
+            "gaussian_curvature",
+            "rms_curvature",
+            "abs_curvature",
+            "thickness",
+        ]:
+            metrics.append(f"{metric}_mean")
+            metrics.append(f"{metric}_median")
+            metrics.append(f"{metric}_std")
+
+        df = pd.DataFrame({"id": mesh_ids})
+        # add columns to df
+        for metric in metrics:
+            df[metric] = 0.0
+
+        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
+
+        meta = pd.DataFrame(columns=df.columns)
+        ddf_out = ddf.map_partitions(self.analyze_mesh_df, meta=meta)
+        with dask_util.start_dask(self.num_workers, "analyze meshes", logger):
+            with io_util.Timing_Messager("Analyzing meshes", logger):
+                results = ddf_out.compute()
+        # write out results to csv
+        output_directory = f"{dirname}metrics"
+        os.makedirs(output_directory, exist_ok=True)
+        results.to_csv(f"{output_directory}/mesh_metrics.csv", index=False)
 
     def _assemble_mesh(self, mesh_id):
         block_meshes = []
@@ -241,9 +287,12 @@ class Meshify:
             chunk_size=self.read_write_roi.shape, offset=self.total_roi.offset[::-1]
         )
         mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
+
         # simplify and smooth the final mesh
         try:
-            mesh = self._simplify_and_smooth_mesh(mesh)
+            mesh = Meshify.simplify_and_smooth_mesh(mesh)
+            if len(mesh.faces) == 0:
+                raise Exception(f"Mesh {mesh_id} contains no faces")
         except Exception as e:
             raise Exception(f"{mesh_id} failed, with error: {e}")
 
@@ -251,7 +300,6 @@ class Meshify:
         shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
-        # output_dir =
         self.dirname = dirname
         mesh_ids = os.listdir(dirname)
         b = db.from_sequence(mesh_ids, npartitions=self.num_workers * 10).map(
@@ -286,6 +334,8 @@ class Meshify:
         """Get the meshes using dask save them to disk in a temporary directory"""
         os.makedirs(self.output_directory, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmpdirname:
-            tupdupname = "/nrs/cellmap/ackermand/tests/tmp/dask/mesh20240522"
+            tupdupname = "/nrs/cellmap/ackermand/tmp/ld/20240529_1"
+            os.makedirs(tupdupname, exist_ok=True)
             self.get_chunked_meshes(tupdupname)
             self.assemble_meshes(tupdupname)
+            self.analyze_meshes(self.output_directory)

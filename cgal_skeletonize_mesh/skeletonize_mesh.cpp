@@ -25,7 +25,28 @@ typedef Skeletonization::Skeleton                             Skeleton;
 typedef Skeleton::vertex_descriptor                           Skeleton_vertex;
 typedef Skeleton::edge_descriptor                             Skeleton_edge;
 //only needed for the display of the skeleton as maximal polylines
-
+struct Display_polylines{
+  const Skeleton& skeleton;
+  std::ofstream& out;
+  int polyline_size;
+  std::stringstream sstr;
+  Display_polylines(const Skeleton& skeleton, std::ofstream& out)
+    : skeleton(skeleton), out(out)
+  {}
+  void start_new_polyline(){
+    polyline_size=0;
+    sstr.str("");
+    sstr.clear();
+  }
+  void add_node(Skeleton_vertex v){
+    ++polyline_size;
+    sstr << " " << v;//skeleton[v].point;
+  }
+  void end_polyline()
+  {
+    out << "p " << sstr.str() << "\n";
+  }
+};
 
 // This example extracts a medially centered skeleton from a given mesh.
 
@@ -95,6 +116,12 @@ int main(int argc, char* argv[])
   }
 
 
+  //output.close();
+
+  // Output all the edges of the skeleton.
+  //std::ofstream output("skel-poly.polylines.txt");
+  Display_polylines display(skeleton,output);
+  CGAL::split_graph_into_polylines(skeleton, display);
   output.close();
 
   // //  Output skeleton points and the corresponding surface points

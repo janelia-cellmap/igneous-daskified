@@ -14,4 +14,6 @@ readme = "README.md"
 license = {file = "LICENSE.txt"}
 
 [project.scripts]
-igneous-daskified = "igneous_daskified.process.ci_skeletonize:mainDaskTest"
+meshify = "igneous_daskified.process.ci_skeletonize:meshify"
+skeletonize = "igneous_daskified.process.ci_skeletonize:skeletonize"
+process-function-blockwise = "igneous_daskified.util.daisy_util:process_function_blockwise"
