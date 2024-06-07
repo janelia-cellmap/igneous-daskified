@@ -13,6 +13,8 @@ from datetime import datetime
 import argparse
 import yaml
 from yaml.loader import SafeLoader
+from funlib.geometry import Roi
+from funlib.persistence import open_ds
 
 # Much below taken from flyemflows: https://github.com/janelia-flyem/flyemflows/blob/master/flyemflows/util/util.py
 logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.INFO)
@@ -71,21 +73,23 @@ def read_run_config(config_path):
         Dicts of required_settings and optional_decimation_settings
     """
 
+    def get_roi_from_string(roi_string):
+        # roi will look like this ["z_start:z_end", "y_start:y_end", "x_start:x_end"]. split it and convert to tuple
+        roi_start = [int(d.split(":")[0]) for d in roi_string]
+        roi_ends = [int(d.split(":")[1]) for d in roi_string]
+
+        roi_extents = [int(roi_ends[i] - roi_start[i]) for i in range(len(roi_string))]
+        roi = Roi(roi_start, roi_extents)
+        return roi
+
     with open(f"{config_path}/run-config.yaml") as f:
         config = yaml.load(f, Loader=SafeLoader)
-        required_settings = config["required_settings"]
-        optional_decimation_settings = config.get("optional_decimation_settings", {})
 
-        if "skip_decimation" not in optional_decimation_settings:
-            optional_decimation_settings["skip_decimation"] = False
-        if "decimation_factor" not in optional_decimation_settings:
-            optional_decimation_settings["decimation_factor"] = 2
-        if "aggressiveness" not in optional_decimation_settings:
-            optional_decimation_settings["aggressiveness"] = 7
-        if "delete_decimated_meshes" not in optional_decimation_settings:
-            optional_decimation_settings["delete_decimated_meshes"] = False
+    for key in config.keys():
+        if "roi" in key:
+            config[key] = get_roi_from_string(config[key])
 
-        return required_settings, optional_decimation_settings
+    return config
 
 
 def parser_params():
