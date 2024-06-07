@@ -4,45 +4,28 @@ import fast_simplification
 
 # import pymeshlab
 
-import daisy
 from funlib.persistence import Array, open_ds
 from funlib.geometry import Roi
 import numpy as np
-import tempfile
-import pickle
 import os
-import json
 import logging
-import kimimaro
-import navis
-import skeletor
-from cloudvolume import Skeleton as CloudVolumeSkeleton
-from neuroglancer.skeleton import Skeleton as NeuroglancerSkeleton
-import dask
-from dataclasses import dataclass
 from funlib.geometry import Roi
 from zmesh import Mesher
 from zmesh import Mesh as Zmesh
-from kimimaro.postprocess import remove_ticks, connect_pieces
 import fastremap
 import pandas as pd
-from igneous_daskified.util import dask_util, io_util, neuroglancer_util
+from igneous_daskified.util import dask_util, io_util
 import dask.bag as db
-import networkx as nx
 from cloudvolume.mesh import Mesh as CloudVolumeMesh
 import dask.dataframe as dd
 from neuroglancer.skeleton import VertexAttributeInfo
 import pyvista as pv
 import pymeshfix
 import shutil
-
-# prepend ld_library_path with path to pymeshlab shared libraries
-os.environ["LD_LIBRARY_PATH"] = "/usr/local/lib:" + os.environ.get(
-    "LD_LIBRARY_PATH", ""
+from igneous_daskified.process.downsample_numba import (
+    downsample_labels_3d_suppress_zero,
 )
-
 import pymeshlab
-
 import trimesh
 
 logging.basicConfig(
@@ -58,20 +41,28 @@ class Meshify:
 
     def __init__(
         self,
-        segmentation_array: Array,
+        input_path: str,
         output_directory: str,
         total_roi: Roi = None,
+        max_num_voxels=np.inf,  # 50 * 512**3,  # 500 blocks times 512*512*512
         read_write_roi: Roi = None,
-        log_dir: str = None,
+        downsample_factor: int | None = None,
+        target_reduction: float = 0.99,
         num_workers: int = 10,
     ):
-        self.segmentation_array = segmentation_array
+
+        for file_type in [".n5", ".zarr"]:
+            if file_type in input_path:
+                path_split = input_path.split(file_type + "/")
+                break
+
+        self.segmentation_array = open_ds(path_split[0] + file_type, path_split[1])
         self.output_directory = output_directory
 
         if total_roi:
             self.total_roi = total_roi
         else:
-            self.total_roi = segmentation_array.roi
+            self.total_roi = self.segmentation_array.roi
         self.num_workers = num_workers
 
         if read_write_roi:
@@ -83,10 +74,15 @@ class Meshify:
                 * self.segmentation_array.voxel_size,
             )
 
-        self.voxel_size = segmentation_array.voxel_size
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-            daisy.logging.set_log_basedir(log_dir)
+        self.max_num_blocks = max_num_voxels / np.prod(
+            self.read_write_roi.shape / self.segmentation_array.voxel_size
+        )
+        self.voxel_size = self.segmentation_array.voxel_size
+
+        self.downsample_factor = downsample_factor
+        if self.downsample_factor:
+            self.voxel_size *= self.downsample_factor
+        self.target_reduction = target_reduction
 
     @staticmethod
     def my_cloudvolume_concatenate(*meshes):
@@ -110,6 +106,10 @@ class Meshify:
         segmentation_block = self.segmentation_array.to_ndarray(block.roi)
         if segmentation_block.dtype.byteorder == ">":
             segmentation_block = segmentation_block.newbyteorder().byteswap()
+        if self.downsample_factor:
+            segmentation_block, _ = downsample_labels_3d_suppress_zero(
+                segmentation_block, self.downsample_factor
+            )
         # initial marching cubes pass
         # close controls whether meshes touching
         # the image boundary are left open or closed
@@ -126,7 +126,7 @@ class Meshify:
             self.total_roi,
             self.segmentation_array,
             self.read_write_roi.shape,
-            self.segmentation_array.voxel_size,
+            self.voxel_size,
         )
 
         b = db.from_sequence(blocks, npartitions=self.num_workers * 10).map(
@@ -139,6 +139,26 @@ class Meshify:
 
     @staticmethod
     def simplify_and_smooth_mesh(mesh, target_reduction=0.99, n_smoothing_iter=10):
+
+        def get_cleaned_simplified_and_smoothed_mesh(
+            mesh, target_count, aggressiveness, do_simplification
+        ):
+            if do_simplification:
+                simplified_mesh = fast_simplification.simplify_mesh(
+                    mesh, target_count=target_count, agg=aggressiveness
+                )
+            else:
+                simplified_mesh = mesh
+
+            simplified_mesh = simplified_mesh.smooth_taubin(n_smoothing_iter)
+
+            # clean mesh, this helps ensure watertightness, but not guaranteed?
+            vclean, fclean = pymeshfix.clean_from_arrays(
+                simplified_mesh.points,
+                simplified_mesh.faces.reshape(-1, 4)[:, 1:],
+            )
+            return vclean, fclean
+
         components = mesh.split()
 
         if len(components) > 0:
@@ -160,19 +180,41 @@ class Meshify:
         faces = np.concatenate((new_column, mesh.faces), axis=1)
         mesh = pv.PolyData(vertices, faces[:])
 
-        # simplify mesh
+        # initial_target_reduction = target_reduction
         min_faces = 100
-        if mesh.n_faces > min_faces:
-            target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
-            mesh = fast_simplification.simplify_mesh(mesh, target_count=target_count)
-
-        mesh = mesh.smooth_taubin(n_smoothing_iter)
-
-        # clean mesh, this helps ensure watertightness, but not guaranteed?
-        vclean, fclean = pymeshfix.clean_from_arrays(
-            mesh.points,
-            mesh.faces.reshape(-1, 4)[:, 1:],
+        aggressiveness = 7
+        # simplify mesh
+        target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
+        do_simplification = mesh.n_faces > min_faces
+        vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
+            mesh, target_count, aggressiveness, do_simplification
         )
+
+        aggressiveness -= 1
+        # initially would redo only if fclean==0, but noticed that sometimes it simplifies weird structures to a single face which isnt good
+        while (
+            len(fclean) < 0.5 * target_count
+            and aggressiveness >= -1
+            and do_simplification
+        ):
+            # if aggressiveness is <0, then we want to try without simplification
+            vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
+                mesh,
+                target_count,
+                aggressiveness,
+                do_simplification=aggressiveness >= 0,
+            )
+            aggressiveness -= 1
+
+        if do_simplification and aggressiveness == -2:
+            logger.warning(
+                f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) had to be processed unsimplified."
+            )
+
+        if len(fclean) == 0:
+            raise Exception(
+                f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
+            )
 
         vclean += com
         mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
@@ -183,7 +225,9 @@ class Meshify:
         results_df = []
         for row in df.itertuples():
             try:
-                metrics = Meshify.analyze_mesh(f"{self.output_directory}/{row.id}")
+                metrics = Meshify.analyze_mesh(
+                    f"{self.output_directory}/meshes/{row.id}"
+                )
             except Exception as e:
                 raise Exception(f"Error analyzing mesh {row.id}: {e}")
             result_df = pd.DataFrame(metrics, index=[0])
@@ -266,13 +310,34 @@ class Meshify:
             with io_util.Timing_Messager("Analyzing meshes", logger):
                 results = ddf_out.compute()
         # write out results to csv
-        output_directory = f"{dirname}metrics"
+        output_directory = f"{dirname}/metrics"
         os.makedirs(output_directory, exist_ok=True)
         results.to_csv(f"{output_directory}/mesh_metrics.csv", index=False)
 
     def _assemble_mesh(self, mesh_id):
+
+        def store_skipped_info(self, mesh_id):
+            skipped_path = f"{self.output_directory}/too_big_skipped"
+            os.makedirs(skipped_path, exist_ok=True)
+            f = open(f"{skipped_path}/{mesh_id}.txt", "a")
+            f.write(
+                f"Mesh {mesh_id} has too many blocks {len(mesh_files)}>{self.max_num_blocks}. Skipping.\n"
+            )
+            f.write(", ".join(mesh_files))
+            f.close()
+
         block_meshes = []
-        for mesh_file in os.listdir(f"{self.dirname}/{mesh_id}"):
+        mesh_files = os.listdir(f"{self.dirname}/{mesh_id}")
+        if len(mesh_files) >= self.max_num_blocks:
+            logger.warn(
+                f"Mesh {mesh_id} has too many blocks {len(mesh_files)})>{self.max_num_blocks}. Skipping."
+            )
+            store_skipped_info(self, mesh_id)
+
+            shutil.rmtree(f"{self.dirname}/{mesh_id}")
+            return
+
+        for mesh_file in mesh_files:
             with open(f"{self.dirname}/{mesh_id}/{mesh_file}", "rb") as f:
                 mesh = Zmesh.from_ply(f.read())
                 block_meshes.append(mesh)
@@ -290,21 +355,22 @@ class Meshify:
 
         # simplify and smooth the final mesh
         try:
-            mesh = Meshify.simplify_and_smooth_mesh(mesh)
+            mesh = Meshify.simplify_and_smooth_mesh(mesh, self.target_reduction)
             if len(mesh.faces) == 0:
                 raise Exception(f"Mesh {mesh_id} contains no faces")
         except Exception as e:
             raise Exception(f"{mesh_id} failed, with error: {e}")
 
-        _ = mesh.export(f"{self.output_directory}/{mesh_id}.ply")
+        _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
         shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
+        os.makedirs(f"{self.output_directory}/meshes/", exist_ok=True)
         self.dirname = dirname
         mesh_ids = os.listdir(dirname)
-        b = db.from_sequence(mesh_ids, npartitions=self.num_workers * 10).map(
-            self._assemble_mesh
-        )
+        b = db.from_sequence(
+            mesh_ids, npartitions=min(self.num_workers * 10, len(mesh_ids))
+        ).map(self._assemble_mesh)
         with dask_util.start_dask(self.num_workers, "assemble meshes", logger):
             with io_util.Timing_Messager("Assembling meshes", logger):
                 b.compute()
@@ -333,9 +399,9 @@ class Meshify:
     def get_meshes(self):
         """Get the meshes using dask save them to disk in a temporary directory"""
         os.makedirs(self.output_directory, exist_ok=True)
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            tupdupname = "/nrs/cellmap/ackermand/tmp/ld/20240529_1"
-            os.makedirs(tupdupname, exist_ok=True)
-            self.get_chunked_meshes(tupdupname)
-            self.assemble_meshes(tupdupname)
-            self.analyze_meshes(self.output_directory)
+        # with tempfile.TemporaryDirectory() as tmpdirname:
+        tmp_chunked_dir = self.output_directory + "/tmp_chunked"
+        os.makedirs(tmp_chunked_dir, exist_ok=True)
+        self.get_chunked_meshes(tmp_chunked_dir)
+        self.assemble_meshes(tmp_chunked_dir)
+        self.analyze_meshes(self.output_directory + "/meshes")
