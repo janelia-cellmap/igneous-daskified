@@ -6,6 +6,7 @@ import logging
 import sys
 import importlib
 import os
+from dataclasses import dataclass
 
 ############################################
 # HACKY WAY TO IMPORT PYMESHLAB CORRECTLY
@@ -31,6 +32,20 @@ elif pymesh_lib_path not in os.getenv("LD_LIBRARY_PATH"):
 ############################################
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RunProperties:
+    def __init__(self):
+        args = io_util.parser_params()
+
+        # Change execution directory
+        self.execution_directory = dask_util.setup_execution_directory(
+            args.config_path, logger
+        )
+        self.logpath = f"{self.execution_directory}/output.log"
+        self.run_config = io_util.read_run_config(args.config_path)
+        self.run_config["num_workers"] = args.num_workers
 
 
 def main():
@@ -104,7 +119,7 @@ def skeletonize():
     # Change execution directory
     execution_directory = dask_util.setup_execution_directory(args.config_path, logger)
     logpath = f"{execution_directory}/output.log"
-
+    rp = RunProperties()
     # Start mesh creation
     with io_util.tee_streams(logpath):
         os.chdir(execution_directory)
@@ -134,36 +149,11 @@ def skeletonize():
 def meshify():
     from .meshes import Meshify
 
-    args = io_util.parser_params()
-    # Change execution directory
-    execution_directory = dask_util.setup_execution_directory(args.config_path, logger)
-    logpath = f"{execution_directory}/output.log"
-
+    rp = RunProperties()
     # Start mesh creation
-    with io_util.tee_streams(logpath):
-        os.chdir(execution_directory)
-        # ds = open_ds(
-        #     "/nrs/cellmap/ackermand/cellmap/crop_jrc_mus-liver-zon-1.n5",
-        #     "mito",
-        # )
-        # ds = open_ds(
-        #     "/nrs/cellmap/ackermand/cellmap/withFullPaths/jrc_mus-liver-zon-1/jrc_mus-liver-zon-1_postprocessed.zarr",
-        #     "/mito/postprocessed_mito_fixed_filled_volumeFiltered",
-        # )
-        ds = open_ds(
-            "/nrs/cellmap/zouinkhim/predictions/jrc_mus-liver-zon-1/jrc_mus-liver-zon-1_postprocessed.zarr",
-            "20240524_ld/ld_step_2",
-        )
-        meshify = Meshify(
-            ds,
-            output_directory="/nrs/cellmap/ackermand/my_meshes/ld/20240529",
-            # total_roi=Roi(
-            #     (61952, 35072, 120000)[::-1],
-            #     Coordinate(16 * 6000, 16 * 6000, 16 * 6000),
-            # ),
-            read_write_roi=Roi((0, 0, 0), Coordinate(16 * 512, 16 * 512, 16 * 512)),
-            num_workers=args.num_workers,
-        )
+    with io_util.tee_streams(rp.logpath):
+        os.chdir(rp.execution_directory)
+        meshify = Meshify(**rp.run_config)
         meshify.get_meshes()
 
 
