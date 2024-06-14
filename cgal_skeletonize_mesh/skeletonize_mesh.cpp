@@ -103,7 +103,8 @@ int main(int argc, char* argv[])
         }
         average_radius /= skeleton[v].vertices.size();
       }
-      output << "v " << skeleton[v].point << " " << average_radius << "\n" ;
+      // use a higher precision after the decimal point for the output
+      output << "v " << std::fixed << std::setprecision(8) << skeleton[v].point << " " << average_radius << "\n" ;
   }
 
   for(Skeleton_edge e : CGAL::make_range(edges(skeleton)))
@@ -135,7 +136,7 @@ int main(int argc, char* argv[])
   // std::cout << "Number of edges of the skeleton: " << boost::num_edges(skeleton) << "\n";
 
 
-  std::cout << "Success in writing the skeleton to " << argv[2] << std::endl;
+  //std::cout << "Success in writing the skeleton to " << argv[2] << std::endl;
   return EXIT_SUCCESS;
 
 }
