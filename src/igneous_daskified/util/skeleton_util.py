@@ -131,13 +131,7 @@ class CustomSkeleton:
             node = list(subgraph.nodes)[0]
             path = [(node, node)]
         else:
-            _, endpoints = CustomSkeleton.find_branchpoints_and_endpoints(subgraph)
-            # path = list(
-            #     nx.shortest_path(subgraph, source=endpoints[0], target=endpoints[1])
-            # )
-            # print(path)
             path = list(nx.eulerian_path(subgraph))
-            # get path of nodes in path
         start_node = path[0][0]
         end_node = path[-1][-1]
         prepended = False
@@ -177,7 +171,7 @@ class CustomSkeleton:
         for component in nx.connected_components(g_copy):
             g_sub = g_copy.subgraph(component)
             polyline = CustomSkeleton.get_polyline_from_subgraph(g_sub, edges)
-            # polylines.append(polyline)
+            polylines.append(polyline)
 
         # if two branchpoints separated by a single edge, teh above would ignore them, so add them back in
         all_edges = []
