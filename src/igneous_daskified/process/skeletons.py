@@ -1,29 +1,16 @@
-from dataclasses import dataclass
-import struct
-import fast_simplification
-
 # import pymeshlab
 
-import daisy
 from funlib.persistence import Array, open_ds
 from funlib.geometry import Roi
 import numpy as np
 import tempfile
-import pickle
 import os
 import json
 import logging
-import kimimaro
-import navis
-import skeletor
 from cloudvolume import Skeleton as CloudVolumeSkeleton
-from cloudvolume import Mesh
 from neuroglancer.skeleton import Skeleton as NeuroglancerSkeleton
-import dask
-from dataclasses import dataclass
 from funlib.geometry import Roi
-from zmesh import Mesher, Mesh
-from kimimaro.postprocess import remove_ticks, connect_pieces
+from kimimaro.postprocess import _remove_ticks
 import fastremap
 import pandas as pd
 from igneous_daskified.util import dask_util, io_util, neuroglancer_util
@@ -31,6 +18,9 @@ import dask.bag as db
 import networkx as nx
 import dask.dataframe as dd
 from neuroglancer.skeleton import VertexAttributeInfo
+from pybind11_rdp import rdp
+import dask
+from igneous_daskified.util.skeleton_util import CustomSkeleton
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -40,105 +30,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class CustomSkeleton:
-    def __init__(self, vertices=[], edges=[], radii=[], polylines=[]):
-        self.vertices = []
-        self.edges = []
-        self.radii = []
-        self.polylines = []
-
-        self.add_vertices(vertices, radii=radii)
-        self.add_edges(edges)
-        self.add_polylines(polylines)
-
-    def _get_vertex_index(self, vertex):
-        if type(vertex) is not tuple:
-            vertex = tuple(vertex)
-        return self.vertices.index(tuple(vertex))
-
-    def add_vertex(self, vertex, radius=None):
-        if vertex not in self.vertices:
-            self.vertices.append(vertex)
-            if radius:
-                self.radii.append(radius)
-
-    def add_vertices(self, vertices, radii):
-        if radii:
-            for vertex, radius in zip(vertices, radii):
-                self.add_vertex(vertex, radius)
-        else:
-            for vertex in vertices:
-                self.add_vertex(vertex)
-
-    def add_edge(self, edge):
-        if type(edge[0]) != int:
-            # then edges are coordinates, so need to get corresponding radii
-            edge_start_id = self._get_vertex_index(edge[0])
-            edge_end_id = self._get_vertex_index(edge[1])
-            edge = (edge_start_id, edge_end_id)
-        self.edges.append(edge)
-
-    def add_edges(self, edges):
-        for edge in edges:
-            self.add_edge(edge)
-
-    def add_polylines(self, polylines):
-        for polyline in polylines:
-            self.add_polyline(polyline)
-
-    def add_polyline(self, polyline):
-        self.polylines.append(polyline)
-
-    def simplify(self, tolerance_nm=100):
-        # use polylines
-        vertices = []
-        radii = []
-        edges = []
-        simplified_polylines = []
-        for polyline in self.polylines:
-            simplified_polyline = rdp(polyline, epsilon=tolerance_nm)
-            for vertex in simplified_polyline:
-                vertices.append(tuple(vertex))
-                radii.append(skeleton.radii[self._get_vertex_index(tuple(vertex))])
-            simplified_polylines.append(simplified_polyline)
-
-            edges.extend(list(zip(simplified_polyline, simplified_polyline[1:])))
-
-        simplified_skeleton = CustomSkeleton(
-            vertices, edges, radii, simplified_polylines
-        )
-        return simplified_skeleton
-
-
 class Skeletonize:
     """Skeletonize a segmentation array using cgal and dask"""
 
     def __init__(
         self,
-        segmentation_array: Array,
+        input_directory: str,
         output_directory: str,
-        total_roi: Roi = None,
-        read_write_roi: Roi = None,
         num_workers: int = 10,
+        min_branch_length_nm: float = 100,
+        simplification_tolerance_nm: float = 50,
     ):
-        self.segmentation_array = segmentation_array
+        self.input_directory = input_directory
         self.output_directory = output_directory
-
-        if total_roi:
-            self.total_roi = total_roi
-        else:
-            self.total_roi = segmentation_array.roi
         self.num_workers = num_workers
+        self.min_branch_length_nm = min_branch_length_nm
+        self.simplification_tolerance_nm = simplification_tolerance_nm
 
-        if read_write_roi:
-            self.read_write_roi = read_write_roi
-        else:
-            self.read_write_roi: Roi = Roi(
-                (0, 0, 0),
-                self.segmentation_array.chunk_shape
-                * self.segmentation_array.voxel_size,
-            )
-
+    @staticmethod
     def read_skeleton_from_custom_file(filename):
         vertices = []
         edges = []
@@ -163,128 +72,137 @@ class Skeletonize:
 
         return CustomSkeleton(vertices, edges, radii, polylines)
 
-    def read_skeleton_from_custom_file(filename):
-        vertices = []
-        radii = []
-        edges = []
-        with open(filename, "r") as file:
-            for line in file:
-                data = line.strip().split()
-                if data[0] == "v":
-                    vertices.append((float(data[1]), float(data[2]), float(data[3])))
-                    radii.append(float(data[4]))
-                else:
-                    edges.append((int(data[1]), int(data[2])))
-
-        return CloudVolumeSkeleton(vertices, edges, radii)
-
-    @staticmethod
-    def my_remove_ticks(skeleton, tick_threshold):
-        _, unique_counts = fastremap.unique(skeleton.edges, return_counts=True)
-        num_terminal_nodes = np.any(unique_counts == 1)
-        if num_terminal_nodes:
-            skeleton = remove_ticks(skeleton, tick_threshold)
-        return skeleton
-
-    def __my_kimimaro_postprocess(self, skeleton, tick_threshold):
-        label = skeleton.id
-
-        # necessary for removing trivial loops etc
-        # remove_loops and remove_ticks assume a
-        # clean representation
-        skeleton = skeleton.consolidate()
-        # The commented out code below was from the original kimimaro postprocess, but based on our processing, we shouldnt have disconnected components and we want to keep loops
-        # skeleton = remove_dust(skeleton, dust_threshold)
-        # skeleton = remove_loops(skeleton)
-        skeleton = connect_pieces(skeleton)
-        skeleton = Skeletonize.my_remove_ticks(skeleton, tick_threshold)
-        skeleton.id = label
-        skeleton = skeleton.consolidate()
-
-        # NOTE: Our current liver-zon-1 mitos have some disconnected components so we have to only keep largest
-        # only keep largest component
-        comps = skeleton.components()
-        if len(skeleton.components()):
-            skeleton = comps[0]
-            for i in range(1, len(comps)):
-                if len(comps[i].vertices) > len(skeleton.vertices):
-                    skeleton = comps[i]
-
-        # TODO: put this back
-        # assert len(skeleton.components()) == 1
-
-        return skeleton
-
-    def __assemble_skeleton(self, dirname, skeleton_id):
-        block_skeletons = []
-        for skeleton_file in os.listdir(f"{dirname}/{skeleton_id}"):
-            with open(f"{dirname}/{skeleton_id}/{skeleton_file}", "rb") as f:
-                block_skeleton = pickle.load(f)
-                block_skeletons.append(block_skeleton)
-        cloudvolume_skeleton = CloudVolumeSkeleton.simple_merge(block_skeletons)
-        cloudvolume_skeleton = self.__my_kimimaro_postprocess(cloudvolume_skeleton, 80)
-
-        return cloudvolume_skeleton
-
-    @staticmethod
-    def simplify_cloudvolume_skeleton(cloudvolume_skeleton, tick_threshold=None):
-        # to simplify skeletons: https://github.com/navis-org/skeletor/issues/38#issuecomment-1491714639
-        n = navis.TreeNeuron(cloudvolume_skeleton.to_swc(), soma=None)
-        ds = navis.downsample_neuron(n, downsampling_factor=20)
-
-        # the above downsampling breaks loops, so we now have to rebuild the loops by finding edges that were broken
-        nodes_df = ds.nodes
-        endpoints = (
-            nodes_df.loc[nodes_df["type"] != "slab", ["node_id"]].to_numpy().flatten()
+    def _get_skeleton_from_mesh(self, mesh):
+        input_file = f"{self.input_directory}/{mesh}"
+        os.makedirs(f"{self.output_directory}/cgal", exist_ok=True)
+        mesh_id = mesh.split(".")[0]
+        output_file = f"{self.output_directory}/cgal/{mesh_id}.txt"
+        exit_status = os.system(
+            f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/cgal_skeletonize_mesh/skeletonize_mesh {input_file} {output_file}"
         )
-        print(endpoints)
-        cloudvolume_edges = cloudvolume_skeleton.edges.tolist()
-        edges = ds.edges
-        for i in range(len(endpoints)):
-            e1 = endpoints[i]
-            for j in range(i + 1, len(endpoints)):
-                e2 = endpoints[j]
-                if [e1 - 1, e2 - 1] in cloudvolume_edges or [
-                    e2 - 1,
-                    e1 - 1,
-                ] in cloudvolume_edges:
-                    print(e1 - 1, e2 - 1)
-                    edges = np.concatenate((edges, [[e1, e2]]))
-        edges = fastremap.remap(
-            edges, dict(zip(nodes_df["node_id"].to_numpy(), nodes_df.index))
-        )
-        vertices = nodes_df[["x", "y", "z"]].to_numpy()
-        radii = nodes_df["radius"].to_numpy().flatten()
-
-        output_skeleton = CloudVolumeSkeleton(
-            vertices=vertices, edges=edges, radii=radii
-        )
-        if tick_threshold:
-            output_skeleton = Skeletonize.my_remove_ticks(
-                output_skeleton, tick_threshold
+        if exit_status:
+            raise Exception(
+                f"Error in skeletonizing {input_file}; exit status {os.WEXITSTATUS(exit_status)}"
             )
 
-        return output_skeleton
+    def process_custom_skeleton_df(self, df):
+        results_df = []
+        for row in df.itertuples():
+            try:
+                metrics = Skeletonize.process_custom_skeleton(
+                    skeleton_path=f"{self.output_directory}/cgal/{row.id}",
+                    output_directory=self.output_directory,
+                    min_branch_length_nm=self.min_branch_length_nm,
+                    simplification_tolerance_nm=self.simplification_tolerance_nm,
+                )
+            except Exception as e:
+                raise Exception(f"Error processing skeleton {row.id}: {e}")
+            result_df = pd.DataFrame(metrics, index=[0])
+            results_df.append(result_df)
 
-    def __write_skeleton(
-        self,
-        skeleton_id,
-        vertices,
-        edges,
-        vertex_attributes=None,
-        grouped_by_cells=False,
+        results_df = pd.concat(results_df, ignore_index=True)
+        return results_df
+
+    @staticmethod
+    def process_custom_skeleton(
+        skeleton_path,
+        output_directory,
+        min_branch_length_nm=100,
+        simplification_tolerance_nm=50,
     ):
-        output_directory = self.output_directory
-        if grouped_by_cells:
-            output_directory += "_cells"
+        skeleton_id = os.path.basename(skeleton_path).split(".")[0]
+        custom_skeleton = Skeletonize.read_skeleton_from_custom_file(skeleton_path)
 
-        with open(f"{output_directory}/{skeleton_id}", "wb") as f:
-            skel = NeuroglancerSkeleton(vertices, edges, vertex_attributes)
-            encoded = skel.encode(self.source)
-            f.write(encoded)
+        custom_skeleton_pruned = custom_skeleton.prune(min_branch_length_nm)
 
-    def __write_skeleton_metadata(self, skeleton_ids, grouped_by_cells=False):
-        output_directory = self.output_directory
+        # get some properties
+        metrics = {"id": skeleton_id}
+        metrics["lsp (nm)"] = Skeletonize.get_longest_shortest_path_distance(
+            custom_skeleton_pruned
+        )
+        metrics["radius mean (nm)"] = np.mean(custom_skeleton_pruned.radii)
+        metrics["radius std (nm)"] = np.std(custom_skeleton_pruned.radii)
+        metrics["num branches"] = len(custom_skeleton_pruned.polylines)
+
+        custom_skeleton_pruned_simplified = custom_skeleton_pruned.simplify(
+            simplification_tolerance_nm
+        )
+
+        custom_skeleton.write_neuroglancer_skeleton(
+            f"{output_directory}/skeleton/full/{skeleton_id}"
+        )
+        custom_skeleton_pruned_simplified.write_neuroglancer_skeleton(
+            f"{output_directory}/skeleton/simplified/{skeleton_id}"
+        )
+        return metrics
+
+    def get_skeletons_from_meshes(self):
+        meshes = os.listdir(self.input_directory)
+        # meshes = [f"{i}.ply" for i in range(1, 1000)]
+        b = db.from_sequence(
+            meshes, npartitions=min(self.num_workers * 10, len(meshes))
+        ).map(self._get_skeleton_from_mesh)
+        with dask_util.start_dask(self.num_workers, "create skeletons", logger):
+            with io_util.Timing_Messager("Creating skeletons", logger):
+                b.compute()
+
+    def process_custom_skeletons(self):
+        self.cgal_output_directory = f"{self.output_directory}/cgal/"
+        skeleton_filenames = os.listdir(self.cgal_output_directory)
+        metrics = ["lsp (nm)", "radius mean (nm)", "radius std (nm)", "num branches"]
+        df = pd.DataFrame({"id": skeleton_filenames})
+        # add columns to df
+        for metric in metrics:
+            df[metric] = -1.0
+
+        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
+
+        meta = pd.DataFrame(columns=df.columns)
+        ddf_out = ddf.map_partitions(self.process_custom_skeleton_df, meta=meta)
+        with dask_util.start_dask(self.num_workers, "process skeletons", logger):
+            with io_util.Timing_Messager("Processing skeletons", logger):
+                results = ddf_out.compute()
+
+        # write out results to csv
+        output_directory = f"{self.output_directory}/metrics"
+        os.makedirs(output_directory, exist_ok=True)
+
+        # write out results
+        results.sort_values("lsp (nm)", ascending=False, inplace=True)
+        results.to_csv(f"{output_directory}/skeleton_metrics.csv", index=False)
+
+        skeleton_ids = [
+            skeleton_filename.split(".txt")[0]
+            for skeleton_filename in skeleton_filenames
+        ]
+        # write out neuroglancer metadata
+        self.__write_skeleton_metadata(
+            f"{self.output_directory}/skeleton/full", skeleton_ids
+        )
+        self.__write_skeleton_metadata(
+            f"{self.output_directory}/skeleton/simplified", skeleton_ids
+        )
+
+    # def __write_skeleton(
+    #     self,
+    #     skeleton_id,
+    #     vertices,
+    #     edges,
+    #     vertex_attributes=None,
+    #     grouped_by_cells=False,
+    # ):
+    #     output_directory = self.output_directory
+    #     if grouped_by_cells:
+    #         output_directory += "_cells"
+
+    #     with open(f"{output_directory}/{skeleton_id}", "wb") as f:
+    #         skel = NeuroglancerSkeleton(vertices, edges, vertex_attributes)
+    #         encoded = skel.encode(self.source)
+    #         f.write(encoded)
+
+    def __write_skeleton_metadata(
+        self, output_directory, skeleton_ids, grouped_by_cells=False
+    ):
         if grouped_by_cells:
             output_directory += "_cells"
         os.makedirs(output_directory, exist_ok=True)
@@ -295,17 +213,25 @@ class Skeletonize:
             "segment_properties": "segment_properties",
         }
 
-        if self.source.vertex_attributes:
-            vertex_attributes = []
-            for attribute_name, attribute_info in self.source.vertex_attributes.items():
-                vertex_attributes.append(
-                    {
-                        "id": attribute_name,
-                        "data_type": str(attribute_info.data_type).split("np.")[-1],
-                        "num_components": attribute_info.num_components,
-                    }
-                )
-            metadata["vertex_attributes"] = vertex_attributes
+        # self.source = neuroglancer_util.Source()
+        # self.get_chunked_skeletons(tupdupname)
+        # self.process_chunked_skeletons(tupdupname)
+        # self.source = neuroglancer_util.Source(
+        #     vertex_attributes={
+        #         "lsp": VertexAttributeInfo(data_type=np.float32, num_components=1)
+        #     }
+        # )
+        # if self.source.vertex_attributes:
+        #     vertex_attributes = []
+        #     for attribute_name, attribute_info in self.source.vertex_attributes.items():
+        #         vertex_attributes.append(
+        #             {
+        #                 "id": attribute_name,
+        #                 "data_type": str(attribute_info.data_type).split("np.")[-1],
+        #                 "num_components": attribute_info.num_components,
+        #             }
+        #         )
+        #     metadata["vertex_attributes"] = vertex_attributes
 
         with open(os.path.join(f"{output_directory}", "info"), "w") as f:
             f.write(json.dumps(metadata))
@@ -322,123 +248,6 @@ class Skeletonize:
         }
         with open(f"{output_directory}/segment_properties/info", "w") as f:
             f.write(json.dumps(segment_properties))
-
-    # @dask.delayed
-    def process_chunked_skeleton(self, skeleton_id):
-        try:
-            cloudvolume_skeleton = self.__assemble_skeleton(self.dirname, skeleton_id)
-        except:
-            with open("/nrs/cellmap/ackermand/whydask/fail.txt", "w") as f:
-                f.write(
-                    json.dumps("/nrs/cellmap/ackermand/whydask/fail.txt {skeleton_id}")
-                )
-            raise Exception(f"skeleton assembly failed for id {skeleton_id}")
-        try:
-            simplified_skeletor_skeleton = Skeletonize.simplify_cloudvolume_skeleton(
-                cloudvolume_skeleton
-            )
-        except:
-            with open("/nrs/cellmap/ackermand/whydask/fail.txt", "w") as f:
-                f.write(
-                    json.dumps("/nrs/cellmap/ackermand/whydask/fail.txt {skeleton_id}")
-                )
-            raise Exception(f"skeleton simplification failed for id {skeleton_id}")
-        self.__write_skeleton(
-            skeleton_id,
-            simplified_skeletor_skeleton.vertices,
-            simplified_skeletor_skeleton.edges,
-        )
-
-    def process_chunked_skeletons(self, dirname):
-        self.dirname = dirname
-        """Process the chunked skeletons in parallel using dask"""
-        # skeleton_ids = os.listdir(dirname)
-        # lazy_results = [None] * len(skeleton_ids)
-        # for idx, skeleton_id in enumerate(skeleton_ids):
-        #     lazy_results[idx] = self.__process_chunked_skeleton(dirname, skeleton_id)
-
-        # with dask_util.start_dask(self.num_workers, "assemble skeletons", logger):
-        #     with io_util.Timing_Messager("Generating assemble skeletons", logger):
-
-        #         dask.compute(*lazy_results)
-
-        skeleton_ids = os.listdir(dirname)
-        b = db.from_sequence(skeleton_ids, npartitions=self.num_workers * 10).map(
-            self.process_chunked_skeleton
-        )
-        with dask_util.start_dask(self.num_workers, "assemble skeletons", logger):
-            with io_util.Timing_Messager("Assembling skeletons", logger):
-                b.compute()
-                # b.to_textfiles("/nrs/cellmap/ackermand/whydask/*.json.gz")
-                # dask.compute(*lazy_results)
-
-        self.__write_skeleton_metadata(skeleton_ids)
-
-    def get_chunked_skeleton(
-        self,
-        block,  #: DaskBlock,
-    ):
-        os.makedirs(
-            "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daskAttempts",
-            exist_ok=True,
-        )
-        try:
-            # t0 = time.time()
-            segmentation_block = self.segmentation_array.to_ndarray(block.roi)
-            if np.any(segmentation_block):
-                # raise Exception(dask.config.config)
-                # swap byte order in place if little endian
-                if segmentation_block.dtype.byteorder == ">":
-                    segmentation_block = segmentation_block.newbyteorder().byteswap()
-                # t1 = time.time()
-
-                skels = kimimaro.skeletonize(
-                    segmentation_block,
-                    teasar_params={
-                        "scale": 4,  # 1.5,
-                        "const": 300,  # physical units
-                        "pdrf_scale": 100000,
-                        "pdrf_exponent": 4,
-                        "soma_acceptance_threshold": 100000,  # 3500,  # physical units
-                        "soma_detection_threshold": 100000,  # 750,  # physical units
-                        "soma_invalidation_const": 300,  # physical units
-                        "soma_invalidation_scale": 2,
-                        "max_paths": 300,  # default None
-                    },
-                    # object_ids=[ ... ], # process only the specified labels
-                    # extra_targets_before=[ (27,33,100), (44,45,46) ], # target points in voxels
-                    # extra_targets_after=[ (27,33,100), (44,45,46) ], # target points in voxels
-                    dust_threshold=0,  # skip connected components with fewer than this many voxels
-                    anisotropy=(8, 8, 8),  # default True
-                    fix_branching=True,  # default True
-                    fix_borders=True,  # default True
-                    fill_holes=False,  # default False
-                    fix_avocados=False,  # default False
-                    progress=False,  # default False, show progress bar
-                    parallel=1,  # <= 0 all cpu, 1 single process, 2+ multiprocess
-                    parallel_chunk_size=100,  # how many skeletons to process before updating progress bar
-                )
-                # t2 = time.time()
-                for id, skel in skels.items():
-                    # skeletons, unlike meshes, come out zyx
-                    skel.vertices = np.fliplr(skel.vertices + block.roi.offset)
-
-                    os.makedirs(f"{self.dirname}/{id}", exist_ok=True)
-                    with open(
-                        f"{self.dirname}/{id}/block_{block.index}.pkl", "wb"
-                    ) as fp:
-                        pickle.dump(skel, fp)
-        except:
-            raise Exception(
-                f"chunked skeleton failed for block {block},{block.index},{block.roi}"
-            )
-        # t3 = time.time()
-        # write elapsed time to file named with blockid
-        # with open(
-        #     f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/tmp/lsf/timings/daskAttempts/{block.index}",
-        #     "w",
-        # ) as f:
-        #     f.write(f"{time.time() - t0},{t1-t0},{t2-t1},{t3-t2}")
 
     def get_all_skeleton_information(self, df):
         results_df = []
@@ -460,7 +269,7 @@ class Skeletonize:
         return results_df
 
     @staticmethod
-    def get_longest_shortest_path(skeleton: CloudVolumeSkeleton):
+    def get_longest_shortest_path_distance(skeleton):
         # make graph using edges and vertices
         g = nx.Graph()
         g.add_nodes_from(range(len(skeleton.vertices)))
@@ -468,65 +277,57 @@ class Skeletonize:
         # add edge weights to the graph where weights are the distances between vertices
         for edge in skeleton.edges:
             g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
-                skeleton.vertices[skeleton.edge[0]]
-                - skeleton.vertices[skeleton.edge[1]]
+                np.array(skeleton.vertices[edge[0]])
+                - np.array(skeleton.vertices[edge[1]])
             )
         node_distances = dict(nx.all_pairs_dijkstra_path_length(g, weight="weight"))
-        max_distance = 0
-        for node, distance_dict in node_distances.items():
-            max_dist_node = max(distance_dict, key=distance_dict.get)
-            current_max_distance = distance_dict[max_dist_node]
-            if current_max_distance > max_distance:
-                max_distance = current_max_distance
-                max_distance_node_1 = node
-                max_distance_node_2 = max_dist_node
-                # print(node, max_dist_node, current_max_distance)
-        longest_shortest_path = nx.dijkstra_path(
-            g, max_distance_node_1, max_distance_node_2, weight="weight"
+        # get the maximum distance between any two nodes
+        max_distance = max(
+            max(distance_dict.values()) for distance_dict in node_distances.values()
         )
 
-        return longest_shortest_path, max_distance
+        return max_distance
 
-    def get_longest_shortest_path_distance(self, skeleton_id):
-        with open(
-            f"{self.output_directory}/{skeleton_id}",
-            "rb",
-        ) as f:
-            file_content = f.read()
+    # def get_longest_shortest_path_distance(self, skeleton_id):
+    #     with open(
+    #         f"{self.output_directory}/{skeleton_id}",
+    #         "rb",
+    #     ) as f:
+    #         file_content = f.read()
 
-        num_vertices, file_content = unpack_and_remove("I", 1, file_content)
-        num_edges, file_content = unpack_and_remove("I", 1, file_content)
+    #     num_vertices, file_content = unpack_and_remove("I", 1, file_content)
+    #     num_edges, file_content = unpack_and_remove("I", 1, file_content)
 
-        vertices, file_content = unpack_and_remove("f", 3 * num_vertices, file_content)
-        vertices = np.reshape(vertices, (num_vertices, 3))
+    #     vertices, file_content = unpack_and_remove("f", 3 * num_vertices, file_content)
+    #     vertices = np.reshape(vertices, (num_vertices, 3))
 
-        edges, file_content = unpack_and_remove("I", 2 * num_edges, file_content)
-        edges = np.reshape(edges, (num_edges, 2))
+    #     edges, file_content = unpack_and_remove("I", 2 * num_edges, file_content)
+    #     edges = np.reshape(edges, (num_edges, 2))
 
-        # make graph using edges and vertices
-        g = nx.Graph()
-        g.add_nodes_from(range(num_vertices))
-        g.add_edges_from(edges)
-        # add edge weights to the graph where weights are the distances between vertices
-        for edge in edges:
-            g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
-                vertices[edge[0]] - vertices[edge[1]]
-            )
-        node_distances = dict(nx.all_pairs_dijkstra_path_length(g, weight="weight"))
-        max_distance = 0
-        for node, distance_dict in node_distances.items():
-            max_dist_node = max(distance_dict, key=distance_dict.get)
-            current_max_distance = distance_dict[max_dist_node]
-            if current_max_distance > max_distance:
-                max_distance = current_max_distance
-                max_distance_node_1 = node
-                max_distance_node_2 = max_dist_node
-                # print(node, max_dist_node, current_max_distance)
-        longest_shortest_path = nx.dijkstra_path(
-            g, max_distance_node_1, max_distance_node_2, weight="weight"
-        )
+    #     # make graph using edges and vertices
+    #     g = nx.Graph()
+    #     g.add_nodes_from(range(num_vertices))
+    #     g.add_edges_from(edges)
+    #     # add edge weights to the graph where weights are the distances between vertices
+    #     for edge in edges:
+    #         g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
+    #             vertices[edge[0]] - vertices[edge[1]]
+    #         )
+    #     node_distances = dict(nx.all_pairs_dijkstra_path_length(g, weight="weight"))
+    #     max_distance = 0
+    #     for node, distance_dict in node_distances.items():
+    #         max_dist_node = max(distance_dict, key=distance_dict.get)
+    #         current_max_distance = distance_dict[max_dist_node]
+    #         if current_max_distance > max_distance:
+    #             max_distance = current_max_distance
+    #             max_distance_node_1 = node
+    #             max_distance_node_2 = max_dist_node
+    #             # print(node, max_dist_node, current_max_distance)
+    #     longest_shortest_path = nx.dijkstra_path(
+    #         g, max_distance_node_1, max_distance_node_2, weight="weight"
+    #     )
 
-        return vertices, edges, max_distance
+    #     return vertices, edges, max_distance
 
     def group_skeletons_by_cell(self, cell_id):
         current_cell_mitos = self.mito_ids[
@@ -639,22 +440,5 @@ class Skeletonize:
     def get_skeletons(self):
         """Get the skeletons using daisy and dask save them to disk in a temporary directory"""
         os.makedirs(self.output_directory, exist_ok=True)
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            tupdupname = "/nrs/cellmap/ackermand/tests/AubreyPresentation20240502/848UpdateTesar/skeletons"  # WithCorrectOverlap"  # "/nrs/cellmap/ackermand/tests/20240430/skeleton5/"  # "/nrs/cellmap/ackermand/tests/AubreyPresentation20240502/20240501/skeletons"  # AubreyPresentation20240502/20240501/skeletons "/nrs/cellmap/ackermand/tests/20240430/skeleton3/"
-            # self.source = neuroglancer_util.Source()
-            # self.get_chunked_skeletons(tupdupname)
-            # self.process_chunked_skeletons(tupdupname)
-            # self.source = neuroglancer_util.Source(
-            #     vertex_attributes={
-            #         "lsp": VertexAttributeInfo(data_type=np.float32, num_components=1)
-            #     }
-            # )
-            # self.group_skeletons_by_cells()
-            self.assign_skeleton_info_to_com()
-
-    def get_meshes(self):
-        """Get the meshes using dask save them to disk in a temporary directory"""
-        os.makedirs(self.output_directory, exist_ok=True)
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            tupdupname = "/nrs/cellmap/ackermand/tests/tmp/dask/mesh/"
-            self.get_chunked_mesh(tupdupname)
+        self.get_skeletons_from_meshes()
+        self.process_custom_skeletons()
