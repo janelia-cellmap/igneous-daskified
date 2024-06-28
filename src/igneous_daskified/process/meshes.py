@@ -276,8 +276,8 @@ class Meshify:
 
         return metrics
 
-    def analyze_meshes(self, dirname):
-        mesh_ids = os.listdir(dirname)
+    def analyze_meshes(self, meshes_dirname, metrics_dirname):
+        mesh_ids = os.listdir(meshes_dirname)
 
         metrics = ["volume", "surface_area"]
         for axis in range(3):
@@ -310,9 +310,8 @@ class Meshify:
             with io_util.Timing_Messager("Analyzing meshes", logger):
                 results = ddf_out.compute()
         # write out results to csv
-        output_directory = f"{dirname}/metrics"
-        os.makedirs(output_directory, exist_ok=True)
-        results.to_csv(f"{output_directory}/mesh_metrics.csv", index=False)
+        os.makedirs(metrics_dirname, exist_ok=True)
+        results.to_csv(f"{metrics_dirname}/mesh_metrics.csv", index=False)
 
     def _assemble_mesh(self, mesh_id):
 
@@ -327,6 +326,11 @@ class Meshify:
             f.close()
 
         block_meshes = []
+        # check if directory exists. if it sucessfully made it through the rest of this function, it will remove the temporary blocked directory. but it may run the function multiple times:
+        # https://stackoverflow.com/questions/44548706/dask-processes-tasks-twice. So we need to check if the directory exists before running the function even if it existed before calling it
+        if not os.path.exists(f"{self.dirname}/{mesh_id}"):
+            return
+
         mesh_files = os.listdir(f"{self.dirname}/{mesh_id}")
         if len(mesh_files) >= self.max_num_blocks:
             logger.warn(
@@ -404,4 +408,6 @@ class Meshify:
         os.makedirs(tmp_chunked_dir, exist_ok=True)
         self.get_chunked_meshes(tmp_chunked_dir)
         self.assemble_meshes(tmp_chunked_dir)
-        self.analyze_meshes(self.output_directory + "/meshes")
+        self.analyze_meshes(
+            self.output_directory + "/meshes", self.output_directory + "/metrics"
+        )
