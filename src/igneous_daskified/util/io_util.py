@@ -15,6 +15,81 @@ import yaml
 from yaml.loader import SafeLoader
 from funlib.geometry import Roi
 from funlib.persistence import open_ds
+import numpy as np
+import io
+import json
+
+
+# write_ngmesh taken from vol2mesh https://github.com/janelia-flyem/vol2mesh/blob/1b667bcd45423bfb7ea17c42a135931c6decf752/vol2mesh/mesh.py#L1032
+def _write_ngmesh(vertices_xyz, faces, f_out):
+    """
+    Write the given vertices (verbatim) and faces to the given
+    binary file object, which must already be open.
+    """
+    f_out.write(np.uint32(len(vertices_xyz)))
+    f_out.write(vertices_xyz.astype(np.float32, "C", copy=False))
+    f_out.write(faces.astype(np.uint32, "C", copy=False))
+
+
+def write_ngmesh(vertices_xyz, faces, f_out=None):
+    """
+    Write the given vertices and faces to the given output path/file,
+    in ngmesh format as described above.
+
+    Args:
+        vertices_xyz:
+            vertex array, shape (V,3)
+
+        faces:
+            face index array, shape (F,3), referring to the rows of vertices_xyz
+
+        f_out:
+            If None, bytes are returned
+            If a file path, the data is written to a file at that path.
+            Otherwise, must be an open binary file object.
+    Returns:
+        If f_out is None, bytes are returned.
+        Otherwise the mesh is written to f_out and None is returned.
+    """
+    if f_out is None:
+        # Return as bytes
+        with io.BytesIO() as bio:
+            _write_ngmesh(vertices_xyz, faces, bio)
+            return bio.getvalue()
+
+    elif isinstance(f_out, str):
+        # Write to a path
+        with open(f_out, "wb") as f:
+            _write_ngmesh(vertices_xyz, faces, f)
+
+    else:
+        # Write to the given file object
+        _write_ngmesh(vertices_xyz, faces, f)
+
+
+def write_ngmesh_metadata(meshdir):
+    mesh_ids = [f.split(":0")[0] for f in os.listdir(meshdir) if ":0" in f]
+    info = {
+        "@type": "neuroglancer_legacy_mesh",
+        "segment_properties": "./segment_properties",
+    }
+
+    with open(meshdir + "/info", "w") as f:
+        f.write(json.dumps(info))
+
+    segment_properties = {
+        "@type": "neuroglancer_segment_properties",
+        "inline": {
+            "ids": [mesh_id for mesh_id in mesh_ids],
+            "properties": [
+                {"id": "label", "type": "label", "values": [""] * len(mesh_ids)}
+            ],
+        },
+    }
+    os.makedirs(meshdir + "/segment_properties", exist_ok=True)
+    with open(meshdir + "/segment_properties/info", "w") as f:
+        f.write(json.dumps(segment_properties))
+
 
 # Much below taken from flyemflows: https://github.com/janelia-flyem/flyemflows/blob/master/flyemflows/util/util.py
 logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.INFO)
@@ -73,21 +148,8 @@ def read_run_config(config_path):
         Dicts of required_settings and optional_decimation_settings
     """
 
-    def get_roi_from_string(roi_string):
-        # roi will look like this ["z_start:z_end", "y_start:y_end", "x_start:x_end"]. split it and convert to tuple
-        roi_start = [int(d.split(":")[0]) for d in roi_string]
-        roi_ends = [int(d.split(":")[1]) for d in roi_string]
-
-        roi_extents = [int(roi_ends[i] - roi_start[i]) for i in range(len(roi_string))]
-        roi = Roi(roi_start, roi_extents)
-        return roi
-
     with open(f"{config_path}/run-config.yaml") as f:
         config = yaml.load(f, Loader=SafeLoader)
-
-    for key in config.keys():
-        if "roi" in key:
-            config[key] = get_roi_from_string(config[key])
 
     return config
 
