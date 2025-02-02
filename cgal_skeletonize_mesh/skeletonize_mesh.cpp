@@ -5,6 +5,9 @@
 #include <CGAL/boost/graph/generators.h>
 #include <CGAL/IO/Color.h>
 
+
+
+
 #include <iostream>
 #include <fstream>
 
@@ -14,6 +17,8 @@
 #include <CGAL/extract_mean_curvature_flow_skeleton.h>
 #include <CGAL/boost/graph/split_graph_into_polylines.h>
 #include <fstream>
+#include <CGAL/subdivision_method_3.h>
+
 
 typedef CGAL::Simple_cartesian<double>                        Kernel;
 typedef Kernel::Point_3                                       Point_3;
@@ -58,14 +63,19 @@ int main(int argc, char* argv[])
   Polyhedron mesh;
   bool read_ok = CGAL::IO::read_PLY(input, mesh);
   if(!read_ok){
-    std::cout << "Error: reading the input file " << argv[1] << std::endl;
-    return EXIT_FAILURE;
+   std::cout << "Error: reading the input file " << argv[1] << std::endl;
+   return EXIT_FAILURE;
   }
   if (!CGAL::is_triangle_mesh(mesh))
   {
     std::cout << "Error: input geometry is not triangulated for " << argv[1] << std::endl;
     return EXIT_FAILURE;
   }
+
+  CGAL_assertion(mesh.is_valid());
+  CGAL::Subdivision_method_3::Loop_subdivision(mesh, 2);
+
+
   Skeleton skeleton;
   CGAL::extract_mean_curvature_flow_skeleton(mesh, skeleton);
   
