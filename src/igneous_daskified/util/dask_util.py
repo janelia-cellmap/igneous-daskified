@@ -1,3 +1,4 @@
+# %%
 from contextlib import contextmanager
 import os
 import dask
@@ -5,7 +6,7 @@ from dask.distributed import Client
 import getpass
 import tempfile
 import shutil
-from .io_util import Timing_Messager, print_with_datetime
+from igneous_daskified.util.io_util import Timing_Messager, print_with_datetime
 from datetime import datetime
 import yaml
 from yaml.loader import SafeLoader
@@ -32,14 +33,15 @@ class DaskBlock:
 def create_blocks(
     roi: Roi,
     ds: Array,
-    block_size=None,
+    read_write_block_shape_pixels=None,
     padding=None,
 ):
     with Timing_Messager("Generating blocks", logger):
         # roi = roi.snap_to_grid(ds.chunk_shape * ds.voxel_size)
-        if not block_size:
-            block_size = ds.chunk_shape * ds.voxel_size
-
+        block_size = read_write_block_shape_pixels
+        if read_write_block_shape_pixels is None:
+            block_size = ds.chunk_shape
+        block_size *= ds.voxel_size
         num_expected_blocks = int(
             np.prod(
                 [np.ceil(roi.shape[i] / block_size[i]) for i in range(len(block_size))]
@@ -48,10 +50,10 @@ def create_blocks(
         # create an empty list with num_expected_blocks elements
         block_rois = [None] * num_expected_blocks
         index = 0
-        for z in range(roi.get_begin()[2], roi.get_end()[2], block_size[2]):
-            for y in range(roi.get_begin()[1], roi.get_end()[1], block_size[1]):
-                for x in range(roi.get_begin()[0], roi.get_end()[0], block_size[0]):
-                    block_roi = Roi((x, y, z), block_size).intersect(roi)
+        for dim_2 in range(roi.get_begin()[2], roi.get_end()[2], block_size[2]):
+            for dim_1 in range(roi.get_begin()[1], roi.get_end()[1], block_size[1]):
+                for dim_0 in range(roi.get_begin()[0], roi.get_end()[0], block_size[0]):
+                    block_roi = Roi((dim_0, dim_1, dim_2), block_size).intersect(roi)
                     if padding:
                         block_roi = block_roi.grow(padding, padding)
                     block_rois[index] = DaskBlock(index, block_roi.intersect(roi))
@@ -144,7 +146,9 @@ def start_dask(num_workers, msg, logger):
             cluster = SGECluster()
         cluster.scale(num_workers)
     try:
-        with Timing_Messager(f"Starting dask cluster for {msg}", logger):
+        with Timing_Messager(
+            f"Starting dask cluster for {msg} with {num_workers} workers", logger
+        ):
             client = Client(cluster)
         print_with_datetime(
             f"Check {client.cluster.dashboard_link} for {msg} status.", logger
