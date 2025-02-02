@@ -245,7 +245,7 @@ class Meshify:
         faces = np.concatenate((new_column, mesh.faces), axis=1)
         mesh = pv.PolyData(vertices, faces[:])
         # print("polydataed")
-        # initial_target_reduction = target_reduction
+
         min_faces = 100
         # simplify mesh
         target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
@@ -272,10 +272,6 @@ class Meshify:
             and aggressiveness >= -1
             and do_simplification
         ):
-            # logger.warning(
-            #     f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}), n_fclean={len(fclean)},{target_count=} had to be processed with {aggressiveness=}."
-            # )
-
             # if aggressiveness is <0, then we want to try without simplification
             vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
                 mesh,
@@ -302,22 +298,7 @@ class Meshify:
             )
 
         output_trimesh_mesh.vertices += com
-
-        # mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
         output_trimesh_mesh.fix_normals()
-        # if not Meshify.is_mesh_valid(mesh):
-        #     ms = pymeshlab.MeshSet()
-        #     m = pymeshlab.Mesh(vclean, fclean)
-        #     ms.add_mesh(m)
-        #     ms.meshing_repair_non_manifold_edges(method="Split Vertices")
-        #     vclean = ms.current_mesh().vertex_matrix()
-        #     fclean = ms.current_mesh().face_matrix()
-        #     mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
-        # if not Meshify.is_mesh_valid(mesh):
-        #     raise Exception(
-        #         f"Mesh could not be smoothed and cleaned even after repair, {mesh.is_winding_consistent=},{mesh.is_watertight=},{mesh.volume=}."
-        #     )
-
         return output_trimesh_mesh
 
     def _assemble_mesh(self, mesh_id):
@@ -381,10 +362,6 @@ class Meshify:
 
             mesh = trimesh.Trimesh(vclean, fclean)
 
-        # _ = mesh.export(
-        #     f"{self.output_directory}/meshes/{mesh_id}_unsimplified_or_smoothed.ply"
-        # )
-
         # simplify and smooth the final mesh
         try:
             mesh = Meshify.simplify_and_smooth_mesh(
@@ -420,7 +397,7 @@ class Meshify:
             )
             with open(f"{self.output_directory}/meshes/{mesh_id}:0", "w") as f:
                 f.write(json.dumps({"fragments": [f"./{mesh_id}"]}))
-        # shutil.rmtree(f"{self.dirname}/{mesh_id}")
+        shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
         os.makedirs(f"{self.output_directory}/meshes/", exist_ok=True)
@@ -434,7 +411,7 @@ class Meshify:
                 b.compute()
         if self.do_legacy_neuroglancer:
             io_util.write_ngmesh_metadata(f"{self.output_directory}/meshes")
-        # shutil.rmtree(dirname)
+        shutil.rmtree(dirname)
 
     def assign_mitos_to_cells(self):
         cells_ds = open_ds(
