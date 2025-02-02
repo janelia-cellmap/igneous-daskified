@@ -16,3 +16,4 @@ license = {file = "LICENSE.txt"}
 [project.scripts]
 meshify = "igneous_daskified.process.cli:meshify"
 skeletonize = "igneous_daskified.process.cli:skeletonize"
+analyze-meshes = "igneous_daskified.process.cli:analyze_meshes"
