@@ -1,10 +1,10 @@
-from dataclasses import dataclass
-import struct
 import fast_simplification
+from igneous_daskified.process.analyze import AnalyzeMeshes
 
 # import pymeshlab
 
-from funlib.persistence import Array, open_ds
+from funlib.persistence import open_ds
+from funlib.persistence.arrays.datasets import _read_attrs
 from funlib.geometry import Roi
 import numpy as np
 import os
@@ -12,13 +12,11 @@ import logging
 from funlib.geometry import Roi
 from zmesh import Mesher
 from zmesh import Mesh as Zmesh
-import fastremap
 import pandas as pd
 from igneous_daskified.util import dask_util, io_util
 import dask.bag as db
 from cloudvolume.mesh import Mesh as CloudVolumeMesh
 import dask.dataframe as dd
-from neuroglancer.skeleton import VertexAttributeInfo
 import pyvista as pv
 import pymeshfix
 import shutil
@@ -27,6 +25,8 @@ from igneous_daskified.process.downsample_numba import (
 )
 import pymeshlab
 import trimesh
+import json
+from funlib.geometry import Coordinate
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -45,10 +45,18 @@ class Meshify:
         output_directory: str,
         total_roi: Roi = None,
         max_num_voxels=np.inf,  # 50 * 512**3,  # 500 blocks times 512*512*512
-        read_write_roi: Roi = None,
+        max_num_blocks=20_000,
+        read_write_block_shape_pixels: list = None,
         downsample_factor: int | None = None,
         target_reduction: float = 0.99,
         num_workers: int = 10,
+        remove_smallest_components: bool = True,
+        n_smoothing_iter: int = 10,
+        default_aggressiveness: int = 7,
+        check_mesh_validity: bool = True,  # useful if meshes will be used for things other than visualization
+        do_simplification: bool = True,
+        do_analysis: bool = True,
+        do_legacy_neuroglancer=False,
     ):
 
         for file_type in [".n5", ".zarr"]:
@@ -59,30 +67,42 @@ class Meshify:
         self.segmentation_array = open_ds(path_split[0] + file_type, path_split[1])
         self.output_directory = output_directory
 
+        # NOTE: Currently true voxel size only works with zarr in certain order...funlib persistence forces voxel size to be integer otherwise:
+        # NOTE: Funlib persistence does not support non-integer voxel sizes
+        self.true_voxel_size, _, _ = _read_attrs(self.segmentation_array.data)
+        self.true_voxel_size = np.array(self.true_voxel_size)
         if total_roi:
             self.total_roi = total_roi
         else:
             self.total_roi = self.segmentation_array.roi
         self.num_workers = num_workers
 
-        if read_write_roi:
-            self.read_write_roi = read_write_roi
+        if read_write_block_shape_pixels:
+            self.read_write_block_shape_pixels = np.array(read_write_block_shape_pixels)
         else:
-            self.read_write_roi: Roi = Roi(
-                (0, 0, 0),
+            self.read_write_block_shape_pixels = np.array(
                 self.segmentation_array.chunk_shape
-                * self.segmentation_array.voxel_size,
             )
 
-        self.max_num_blocks = max_num_voxels / np.prod(
-            self.read_write_roi.shape / self.segmentation_array.voxel_size
-        )
-        self.voxel_size = self.segmentation_array.voxel_size
+        self.max_num_blocks = max_num_blocks  # np.prod(read_write_block_shape_pixels)
+        self.base_voxel_size_funlib = self.segmentation_array.voxel_size
+        self.output_voxel_size_funlib = self.base_voxel_size_funlib
 
         self.downsample_factor = downsample_factor
         if self.downsample_factor:
-            self.voxel_size *= self.downsample_factor
+            self.output_voxel_size_funlib = Coordinate(
+                np.array(self.output_voxel_size_funlib) * self.downsample_factor
+            )
+            self.true_voxel_size *= self.downsample_factor
         self.target_reduction = target_reduction
+
+        self.check_mesh_validity = check_mesh_validity
+        self.remove_smallest_components = remove_smallest_components
+        self.n_smoothing_iter = n_smoothing_iter
+        self.do_analysis = do_analysis
+        self.do_legacy_neuroglancer = do_legacy_neuroglancer
+        self.do_simplification = do_simplification
+        self.default_aggressiveness = default_aggressiveness
 
     @staticmethod
     def my_cloudvolume_concatenate(*meshes):
@@ -102,7 +122,7 @@ class Meshify:
         return CloudVolumeMesh(vertices, faces, normals)
 
     def _get_chunked_mesh(self, block, tmpdirname):
-        mesher = Mesher(self.voxel_size)  # anisotropy of image
+        mesher = Mesher(self.output_voxel_size_funlib[::-1])  # anisotropy of image
         segmentation_block = self.segmentation_array.to_ndarray(block.roi)
         if segmentation_block.dtype.byteorder == ">":
             segmentation_block = segmentation_block.newbyteorder().byteswap()
@@ -113,20 +133,29 @@ class Meshify:
         # initial marching cubes pass
         # close controls whether meshes touching
         # the image boundary are left open or closed
+        block_offset = np.array(block.roi.get_begin())
+
         mesher.mesh(segmentation_block, close=False)
         for id in mesher.ids():
             mesh = mesher.get_mesh(id)
-            mesh.vertices += block.roi.offset[::-1]
+            mesh.vertices += block_offset[::-1]
             os.makedirs(f"{tmpdirname}/{id}", exist_ok=True)
             with open(f"{tmpdirname}/{id}/block_{block.index}.ply", "wb") as fp:
                 fp.write(mesh.to_ply())
+
+    @staticmethod
+    def is_mesh_valid(mesh):
+        valid_volume = (
+            mesh.is_winding_consistent and mesh.is_watertight and mesh.volume > 0
+        )
+        return valid_volume
 
     def get_chunked_meshes(self, dirname):
         blocks = dask_util.create_blocks(
             self.total_roi,
             self.segmentation_array,
-            self.read_write_roi.shape,
-            self.voxel_size,
+            self.read_write_block_shape_pixels,
+            padding=self.output_voxel_size_funlib,
         )
 
         b = db.from_sequence(blocks, npartitions=self.num_workers * 10).map(
@@ -138,65 +167,115 @@ class Meshify:
                 b.compute()
 
     @staticmethod
-    def simplify_and_smooth_mesh(mesh, target_reduction=0.99, n_smoothing_iter=10):
+    def simplify_and_smooth_mesh(
+        mesh,
+        target_reduction=0.99,
+        n_smoothing_iter=10,
+        remove_smallest_components=True,
+        aggressiveness=7,
+        do_simplification=True,
+        check_mesh_validity=True,
+    ):
 
         def get_cleaned_simplified_and_smoothed_mesh(
             mesh, target_count, aggressiveness, do_simplification
         ):
             if do_simplification:
+                # logger.warning("simplifying mesh")
                 simplified_mesh = fast_simplification.simplify_mesh(
-                    mesh, target_count=target_count, agg=aggressiveness
+                    mesh, target_count=target_count, agg=aggressiveness, verbose=True
                 )
+                # logger.warning("simplified")
             else:
                 simplified_mesh = mesh
 
-            simplified_mesh = simplified_mesh.smooth_taubin(n_smoothing_iter)
-
+            if n_smoothing_iter > 0:
+                simplified_mesh = simplified_mesh.smooth_taubin(n_smoothing_iter)
+            # logger.warning("smoothed")
             # clean mesh, this helps ensure watertightness, but not guaranteed?
+            # if remove_smallest_components:
+            if not check_mesh_validity:
+                return (
+                    simplified_mesh.points,
+                    simplified_mesh.faces.reshape(-1, 4)[:, 1:],
+                )
             vclean, fclean = pymeshfix.clean_from_arrays(
                 simplified_mesh.points,
                 simplified_mesh.faces.reshape(-1, 4)[:, 1:],
+                remove_smallest_components=remove_smallest_components,
+                verbose=True,
             )
+            # logger.warning("cleaned")
+            # else:
+            #     return (
+            #         simplified_mesh.points,
+            #         simplified_mesh.faces.reshape(-1, 4)[:, 1:],
+            #     )
+
             return vclean, fclean
 
-        components = mesh.split()
+        if remove_smallest_components:
+            components = mesh.split()
 
-        if len(components) > 0:
-            # this will equal zero if not watertight?
-            mesh = components[0]
-            for m in components[1:]:
-                if len(m.faces) > len(mesh.faces):
-                    mesh = m
+            if len(components) > 0:
+                # this will equal zero if not watertight?
+                mesh = components[0]
+                for m in components[1:]:
+                    if len(m.faces) > len(mesh.faces):
+                        # print(f"{len(m.faces)},{len(mesh.faces)}")
+                        mesh = m
 
         com = mesh.vertices.mean(axis=0)
         # things seem better if center first otherwise for example taubin smoothing shifts things
 
         vertices = mesh.vertices - com
         faces = mesh.faces
+        # print(f"Initial mesh has {len(faces)} faces")
+        output_trimesh_mesh = trimesh.Trimesh(vertices, faces)
+        # print(f"output mesh")
+        if check_mesh_validity and not Meshify.is_mesh_valid(output_trimesh_mesh):
+            raise Exception(
+                f"Initial mesh is not valid, {output_trimesh_mesh.is_winding_consistent=},{output_trimesh_mesh.is_watertight=},{output_trimesh_mesh.volume=}."
+            )
+
         # Create a new column filled with 3s since we need to tell pyvista that each face has 3 vertices in this mesh
         new_column = np.full((mesh.faces.shape[0], 1), 3)
 
         # Concatenate the new column with the original array
         faces = np.concatenate((new_column, mesh.faces), axis=1)
         mesh = pv.PolyData(vertices, faces[:])
-
+        # print("polydataed")
         # initial_target_reduction = target_reduction
         min_faces = 100
-        aggressiveness = 7
         # simplify mesh
         target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
-        do_simplification = mesh.n_faces > min_faces
+        if do_simplification:
+            # check to make sure it is actually necessary
+            do_simplification = mesh.n_faces > min_faces
         vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
             mesh, target_count, aggressiveness, do_simplification
         )
+        # logger.warning(f"got vclean and fclean: len(fclean)={len(fclean)}")
+        trimesh_mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+        if check_mesh_validity:
+            if Meshify.is_mesh_valid(trimesh_mesh):
+                output_trimesh_mesh = trimesh_mesh
+        else:
+            output_trimesh_mesh = trimesh_mesh
+        # logger.warning(f"trimeshed")
 
         aggressiveness -= 1
         # initially would redo only if fclean==0, but noticed that sometimes it simplifies weird structures to a single face which isnt good
+        # also need to check if mesh is valid after simplification
         while (
             len(fclean) < 0.5 * target_count
             and aggressiveness >= -1
             and do_simplification
         ):
+            # logger.warning(
+            #     f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}), n_fclean={len(fclean)},{target_count=} had to be processed with {aggressiveness=}."
+            # )
+
             # if aggressiveness is <0, then we want to try without simplification
             vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
                 mesh,
@@ -205,6 +284,12 @@ class Meshify:
                 do_simplification=aggressiveness >= 0,
             )
             aggressiveness -= 1
+            trimesh_mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+            if check_mesh_validity:
+                if Meshify.is_mesh_valid(trimesh_mesh):
+                    output_trimesh_mesh = trimesh_mesh
+            else:
+                output_trimesh_mesh = trimesh_mesh
 
         if do_simplification and aggressiveness == -2:
             logger.warning(
@@ -216,102 +301,24 @@ class Meshify:
                 f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
             )
 
-        vclean += com
-        mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
-        mesh.fix_normals()
-        return mesh
+        output_trimesh_mesh.vertices += com
 
-    def analyze_mesh_df(self, df):
-        results_df = []
-        for row in df.itertuples():
-            try:
-                metrics = Meshify.analyze_mesh(
-                    f"{self.output_directory}/meshes/{row.id}"
-                )
-            except Exception as e:
-                raise Exception(f"Error analyzing mesh {row.id}: {e}")
-            result_df = pd.DataFrame(metrics, index=[0])
-            results_df.append(result_df)
+        # mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+        output_trimesh_mesh.fix_normals()
+        # if not Meshify.is_mesh_valid(mesh):
+        #     ms = pymeshlab.MeshSet()
+        #     m = pymeshlab.Mesh(vclean, fclean)
+        #     ms.add_mesh(m)
+        #     ms.meshing_repair_non_manifold_edges(method="Split Vertices")
+        #     vclean = ms.current_mesh().vertex_matrix()
+        #     fclean = ms.current_mesh().face_matrix()
+        #     mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+        # if not Meshify.is_mesh_valid(mesh):
+        #     raise Exception(
+        #         f"Mesh could not be smoothed and cleaned even after repair, {mesh.is_winding_consistent=},{mesh.is_watertight=},{mesh.volume=}."
+        #     )
 
-        results_df = pd.concat(results_df, ignore_index=True)
-        return results_df
-
-    @staticmethod
-    def analyze_mesh(mesh_path):
-        id = os.path.basename(mesh_path).split(".")[0]
-        mesh = trimesh.load_mesh(mesh_path)
-        # calculate gneral mesh properties
-        metrics = {"id": id}
-        metrics["volume"] = mesh.volume
-        metrics["surface_area"] = mesh.area
-        pic = mesh.principal_inertia_components
-        pic_normalized = pic / np.linalg.norm(pic)
-        _, ob = trimesh.bounds.oriented_bounds(mesh)
-        ob_normalized = ob / np.linalg.norm(ob)
-        for axis in range(3):
-            metrics[f"pic_{axis}"] = pic[axis]
-            metrics[f"pic_normalized_{axis}"] = pic_normalized[axis]
-            metrics[f"ob_{axis}"] = ob[axis]
-            metrics[f"ob_normalized_{axis}"] = ob_normalized[axis]
-
-        ms = pymeshlab.MeshSet()
-        m = pymeshlab.Mesh(mesh.vertices, mesh.faces)
-        ms.add_mesh(m)
-        for idx, metric in enumerate(["mean", "gaussian", "rms", "abs"]):
-            ms.compute_scalar_by_discrete_curvature_per_vertex(curvaturetype=idx)
-            vsa = ms.current_mesh().vertex_scalar_array()
-            if np.isnan(vsa).all():
-                raise Exception(f"Mesh {id} has no curvature")
-            metrics[f"{metric}_curvature_mean"] = np.nanmean(vsa)
-            metrics[f"{metric}_curvature_median"] = np.nanmedian(vsa)
-            metrics[f"{metric}_curvature_std"] = np.nanstd(vsa)
-
-        ms.compute_scalar_by_shape_diameter_function_per_vertex()
-        vsa = ms.current_mesh().vertex_scalar_array()
-        if np.isnan(vsa).all():
-            raise Exception(f"Mesh {id} has no thickness")
-        metrics["thickness_mean"] = np.nanmean(vsa)
-        metrics["thickness_median"] = np.nanmedian(vsa)
-        metrics["thickness_std"] = np.nanstd(vsa)
-
-        return metrics
-
-    def analyze_meshes(self, meshes_dirname, metrics_dirname):
-        mesh_ids = os.listdir(meshes_dirname)
-
-        metrics = ["volume", "surface_area"]
-        for axis in range(3):
-            metrics.append(f"pic_{axis}")
-            metrics.append(f"pic_normalized_{axis}")
-            metrics.append(f"ob_{axis}")
-            metrics.append(f"ob_normalized_{axis}")
-
-        for metric in [
-            "mean_curvature",
-            "gaussian_curvature",
-            "rms_curvature",
-            "abs_curvature",
-            "thickness",
-        ]:
-            metrics.append(f"{metric}_mean")
-            metrics.append(f"{metric}_median")
-            metrics.append(f"{metric}_std")
-
-        df = pd.DataFrame({"id": mesh_ids})
-        # add columns to df
-        for metric in metrics:
-            df[metric] = 0.0
-
-        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
-
-        meta = pd.DataFrame(columns=df.columns)
-        ddf_out = ddf.map_partitions(self.analyze_mesh_df, meta=meta)
-        with dask_util.start_dask(self.num_workers, "analyze meshes", logger):
-            with io_util.Timing_Messager("Analyzing meshes", logger):
-                results = ddf_out.compute()
-        # write out results to csv
-        os.makedirs(metrics_dirname, exist_ok=True)
-        results.to_csv(f"{metrics_dirname}/mesh_metrics.csv", index=False)
+        return output_trimesh_mesh
 
     def _assemble_mesh(self, mesh_id):
 
@@ -333,7 +340,7 @@ class Meshify:
 
         mesh_files = os.listdir(f"{self.dirname}/{mesh_id}")
         if len(mesh_files) >= self.max_num_blocks:
-            logger.warn(
+            logger.warning(
                 f"Mesh {mesh_id} has too many blocks {len(mesh_files)})>{self.max_num_blocks}. Skipping."
             )
             store_skipped_info(self, mesh_id)
@@ -345,28 +352,75 @@ class Meshify:
             with open(f"{self.dirname}/{mesh_id}/{mesh_file}", "rb") as f:
                 mesh = Zmesh.from_ply(f.read())
                 block_meshes.append(mesh)
-        try:
-            mesh = Meshify.my_cloudvolume_concatenate(*block_meshes)
-        except Exception as e:
-            raise Exception(f"{mesh_id} failed, with error: {e}")
 
-        # doing both of the following may be redundant
-        mesh = mesh.consolidate()  # if you don't have self-contacts
-        mesh = mesh.deduplicate_chunk_boundaries(
-            chunk_size=self.read_write_roi.shape, offset=self.total_roi.offset[::-1]
-        )
-        mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
+        if len(block_meshes) > 1:
+            try:
+                mesh = Meshify.my_cloudvolume_concatenate(*block_meshes)
+            except Exception as e:
+                raise Exception(f"{mesh_id} failed, with error: {e}")
+
+            # doing both of the following may be redundant
+            mesh = mesh.consolidate()  # if you don't have self-contacts
+            chunk_size = (
+                self.read_write_block_shape_pixels * self.base_voxel_size_funlib
+            )
+            mesh = mesh.deduplicate_chunk_boundaries(
+                chunk_size=chunk_size[::-1],
+                offset=self.total_roi.offset[::-1],
+            )
+
+        if self.check_mesh_validity:
+            mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
+
+            # further cleanup attempts
+            vclean, fclean = pymeshfix.clean_from_arrays(
+                mesh.vertices,
+                mesh.faces,
+                remove_smallest_components=self.remove_smallest_components,
+            )
+
+            mesh = trimesh.Trimesh(vclean, fclean)
+
+        # _ = mesh.export(
+        #     f"{self.output_directory}/meshes/{mesh_id}_unsimplified_or_smoothed.ply"
+        # )
 
         # simplify and smooth the final mesh
         try:
-            mesh = Meshify.simplify_and_smooth_mesh(mesh, self.target_reduction)
+            mesh = Meshify.simplify_and_smooth_mesh(
+                mesh,
+                self.target_reduction,
+                self.n_smoothing_iter,
+                self.remove_smallest_components,
+                self.default_aggressiveness,
+                self.do_simplification,
+                self.check_mesh_validity,
+            )
             if len(mesh.faces) == 0:
+                _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
                 raise Exception(f"Mesh {mesh_id} contains no faces")
         except Exception as e:
             raise Exception(f"{mesh_id} failed, with error: {e}")
 
-        _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
-        shutil.rmtree(f"{self.dirname}/{mesh_id}")
+        # correct for difference between funlib voxel sizes (which are rounded) and the actual voxel sizes
+        if list(self.true_voxel_size) != list(self.output_voxel_size_funlib):
+            mesh.vertices -= self.total_roi.offset[::-1]
+            mesh.vertices *= np.array(self.true_voxel_size[::-1]) / np.array(
+                self.output_voxel_size_funlib[::-1]
+            )
+            mesh.vertices += self.total_roi.offset[::-1]
+
+        if not self.do_legacy_neuroglancer:
+            _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
+        else:
+            io_util.write_ngmesh(
+                mesh.vertices,
+                mesh.faces,
+                f"{self.output_directory}/meshes/{mesh_id}",
+            )
+            with open(f"{self.output_directory}/meshes/{mesh_id}:0", "w") as f:
+                f.write(json.dumps({"fragments": [f"./{mesh_id}"]}))
+        # shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
         os.makedirs(f"{self.output_directory}/meshes/", exist_ok=True)
@@ -378,7 +432,9 @@ class Meshify:
         with dask_util.start_dask(self.num_workers, "assemble meshes", logger):
             with io_util.Timing_Messager("Assembling meshes", logger):
                 b.compute()
-        shutil.rmtree(dirname)
+        if self.do_legacy_neuroglancer:
+            io_util.write_ngmesh_metadata(f"{self.output_directory}/meshes")
+        # shutil.rmtree(dirname)
 
     def assign_mitos_to_cells(self):
         cells_ds = open_ds(
@@ -408,6 +464,9 @@ class Meshify:
         os.makedirs(tmp_chunked_dir, exist_ok=True)
         self.get_chunked_meshes(tmp_chunked_dir)
         self.assemble_meshes(tmp_chunked_dir)
-        self.analyze_meshes(
-            self.output_directory + "/meshes", self.output_directory + "/metrics"
-        )
+
+        if self.do_analysis:
+            analyze = AnalyzeMeshes(
+                self.output_directory + "/meshes", self.output_directory + "/metrics"
+            )
+            analyze.analyze()
