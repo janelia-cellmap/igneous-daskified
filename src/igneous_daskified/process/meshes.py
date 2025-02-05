@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 class Meshify:
-    """Skeletonize a segmentation array using kimimaro and dask"""
+    """Get a meshes from a zarr or n5 segmentation array"""
 
     def __init__(
         self,
@@ -69,7 +69,7 @@ class Meshify:
 
         # NOTE: Currently true voxel size only works with zarr in certain order...funlib persistence forces voxel size to be integer otherwise:
         # NOTE: Funlib persistence does not support non-integer voxel sizes
-        self.true_voxel_size, _, _ = _read_attrs(self.segmentation_array.data)
+        self.s, _, _ = _read_attrs(self.segmentation_array.data)
         self.true_voxel_size = np.array(self.true_voxel_size)
         if total_roi:
             self.total_roi = total_roi
