@@ -69,7 +69,7 @@ class Meshify:
 
         # NOTE: Currently true voxel size only works with zarr in certain order...funlib persistence forces voxel size to be integer otherwise:
         # NOTE: Funlib persistence does not support non-integer voxel sizes
-        self.s, _, _ = _read_attrs(self.segmentation_array.data)
+        self.true_voxel_size, _, _ = _read_attrs(self.segmentation_array.data)
         self.true_voxel_size = np.array(self.true_voxel_size)
         if total_roi:
             self.total_roi = total_roi

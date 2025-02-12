@@ -1,4 +1,6 @@
+# %%
 from dataclasses import dataclass
+import struct
 from funlib.persistence import Array, open_ds
 from funlib.geometry import Roi
 import numpy as np
@@ -71,7 +73,7 @@ class CustomSkeleton:
         self.vertices = self.vertices
 
     def add_edge(self, edge):
-        if type(edge[0]) != int:
+        if not isinstance(edge[0], (int, np.integer)):
             # then edges are coordinates, so need to get corresponding radii
             edge_start_id = self._get_vertex_index(edge[0])
             edge_end_id = self._get_vertex_index(edge[1])
@@ -289,6 +291,33 @@ class CustomSkeleton:
 
         return self.graph_to_skeleton(g)
 
+    @staticmethod
+    def lineseg_dists(p, a, b):
+        # https://stackoverflow.com/questions/54442057/calculate-the-euclidian-distance-between-an-array-of-points-to-a-line-segment-in/54442561#54442561
+        # Handle case where p is a single point, i.e. 1d array.
+        p = np.atleast_2d(p)
+
+        # TODO for you: consider implementing @Eskapp's suggestions
+        if np.all(a == b):
+            return np.linalg.norm(p - a, axis=1)
+
+        # normalized tangent vector
+        d = np.divide(b - a, np.linalg.norm(b - a))
+
+        # signed parallel distance components
+        s = np.dot(a - p, d)
+        t = np.dot(p - b, d)
+
+        # clamped parallel distance
+        h = np.maximum.reduce([s, t, np.zeros_like(s)])
+
+        # perpendicular distance component, as before
+        # note that for the 3D case these will be vectors
+        c = np.linalg.norm(np.cross(p - a, d), axis=1)
+
+        # use hypot for Pythagoras to improve accuracy
+        return np.hypot(h, c)
+
     def write_neuroglancer_skeleton(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
@@ -297,3 +326,94 @@ class CustomSkeleton:
             )
             encoded = skel.encode(Source())
             f.write(encoded)
+
+    @staticmethod
+    def read_neuroglancer_skeleton(path):
+        source_info = Source()
+        with open(path, "rb") as f:
+            data = f.read()
+
+        offset = 0
+
+        # 1) Read number of vertices (n_vertices) and number of edges (n_edges).
+        n_vertices, n_edges = struct.unpack_from("<II", data, offset)
+        offset += 8
+
+        # 2) Decode vertex_positions.
+        num_vp_values = n_vertices * 3
+        vertex_positions = np.frombuffer(
+            data, dtype="<f4", count=num_vp_values, offset=offset
+        )
+        offset += vertex_positions.nbytes
+        # Reshape to (n_vertices, vp_dim).
+        vertex_positions = vertex_positions.reshape((n_vertices, 3))
+
+        # 3) Decode edges.
+        num_edge_values = n_edges * 2
+        edges = np.frombuffer(data, dtype="<u4", count=num_edge_values, offset=offset)
+        offset += edges.nbytes
+        # Reshape to (n_edges, edges_dim).
+        edges = edges.reshape((n_edges, 2))
+
+        # 4) Decode vertex_attributes (if any).
+        decoded_attributes = {}
+        if source_info.vertex_attributes:
+            for attr_name, (
+                attr_dtype,
+                num_components,
+            ) in source_info.vertex_attributes.items():
+                # We expect shape = (n_vertices, num_components).
+                expected_size = n_vertices * num_components
+                attribute = np.frombuffer(
+                    data,
+                    dtype=attr_dtype.newbyteorder("<"),
+                    count=expected_size,
+                    offset=offset,
+                )
+                offset += attribute.nbytes
+                attribute = attribute.reshape((n_vertices, num_components))
+                decoded_attributes[attr_name] = attribute
+        # 5) Package results.
+        return vertex_positions, edges
+
+
+# # %%
+# import pandas as pd
+
+# df = pd.read_csv(
+#     "/nrs/cellmap/ackermand/cellmap/analysisResults/jrc_mus-liver-zon-2/mito_with_skeleton.csv"
+# )
+
+# coords = df[["COM Z (nm)", "COM X (nm)", "COM Y (nm)"]].to_numpy()
+
+# # %%
+# from igneous_daskified.process.skeletons import Skeletonize
+
+# skel = Skeletonize.read_skeleton_from_custom_file("filename")
+# coords.shape
+# # %%
+# ps = np.array([[1, 2, 3], [3, 4, 5], [6, 10, 11], [14, 15, 16]])
+# e1 = np.array([0, 0, 0])
+# e2 = np.array([4, 4, 4])
+# print(
+#     CustomSkeleton.lineseg_dists(
+#         coords,
+#         e1,
+#         e2,
+#     )
+# )
+# a = np.zeros(len(ps))
+# for i, p in enumerate(ps):
+#     a[i] = lineseg_dist(
+#         p,
+#         e1,
+#         e2,
+#     )
+# print(a)
+# # %%
+# lineseg_dist(
+#     ps[1],
+#     e1,
+#     e2,
+# )
+# # %%
