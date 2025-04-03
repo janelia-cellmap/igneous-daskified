@@ -1,7 +1,5 @@
 import os
-from funlib.geometry import Roi, Coordinate
 from igneous_daskified.util import dask_util, io_util
-from funlib.persistence import open_ds
 import logging
 import sys
 import importlib
