@@ -81,7 +81,11 @@ class Meshify:
 
         self.max_num_blocks = max_num_blocks  # np.prod(read_write_block_shape_pixels)
         self.base_voxel_size_funlib = self.segmentation_array.voxel_size
-        self.output_voxel_size_funlib = self.base_voxel_size_funlib
+
+        # keep track of funlib voxel size, but make sure it as at least 1, which won't be the case if <1nm
+        self.output_voxel_size_funlib = max(
+            self.base_voxel_size_funlib, Coordinate(1, 1, 1)
+        )
 
         self.downsample_factor = downsample_factor
         if self.downsample_factor:
