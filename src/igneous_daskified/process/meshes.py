@@ -1,8 +1,5 @@
 import fast_simplification
 from igneous_daskified.process.analyze import AnalyzeMeshes
-
-# import pymeshlab
-
 from funlib.persistence import open_ds
 from funlib.persistence.arrays.datasets import _read_attrs
 from funlib.geometry import Roi
@@ -16,14 +13,12 @@ import pandas as pd
 from igneous_daskified.util import dask_util, io_util
 import dask.bag as db
 from cloudvolume.mesh import Mesh as CloudVolumeMesh
-import dask.dataframe as dd
 import pyvista as pv
 import pymeshfix
 import shutil
 from igneous_daskified.process.downsample_numba import (
     downsample_labels_3d_suppress_zero,
 )
-import pymeshlab
 import trimesh
 import json
 from funlib.geometry import Coordinate
@@ -86,7 +81,11 @@ class Meshify:
 
         self.max_num_blocks = max_num_blocks  # np.prod(read_write_block_shape_pixels)
         self.base_voxel_size_funlib = self.segmentation_array.voxel_size
-        self.output_voxel_size_funlib = self.base_voxel_size_funlib
+
+        # keep track of funlib voxel size, but make sure it as at least 1, which won't be the case if <1nm
+        self.output_voxel_size_funlib = max(
+            self.base_voxel_size_funlib, Coordinate(1, 1, 1)
+        )
 
         self.downsample_factor = downsample_factor
         if self.downsample_factor:
@@ -134,7 +133,7 @@ class Meshify:
         # close controls whether meshes touching
         # the image boundary are left open or closed
         block_offset = np.array(block.roi.get_begin())
-
+        # write out segmentation block as numpy array
         mesher.mesh(segmentation_block, close=False)
         for id in mesher.ids():
             mesh = mesher.get_mesh(id)
@@ -215,6 +214,9 @@ class Meshify:
             return vclean, fclean
 
         if remove_smallest_components:
+            if type(mesh) != trimesh.base.Trimesh:
+                mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
+
             components = mesh.split()
 
             if len(components) > 0:
@@ -319,7 +321,9 @@ class Meshify:
         if not os.path.exists(f"{self.dirname}/{mesh_id}"):
             return
 
-        mesh_files = os.listdir(f"{self.dirname}/{mesh_id}")
+        mesh_files = [
+            f for f in os.listdir(f"{self.dirname}/{mesh_id}") if f.endswith(".ply")
+        ]
         if len(mesh_files) >= self.max_num_blocks:
             logger.warning(
                 f"Mesh {mesh_id} has too many blocks {len(mesh_files)})>{self.max_num_blocks}. Skipping."

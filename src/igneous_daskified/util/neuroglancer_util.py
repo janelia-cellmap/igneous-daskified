@@ -3,11 +3,6 @@ import os
 import struct
 import numpy as np
 import json
-from time import sleep
-from datetime import datetime
-import pandas as pd
-from tqdm import tqdm
-from scipy import spatial
 import numpy as np
 
 def unpack_and_remove(datatype, num_elements, file_content):

@@ -1,25 +1,15 @@
 # import pymeshlab
 
-from funlib.persistence import Array, open_ds
-from funlib.geometry import Roi
+from funlib.persistence import open_ds
 import numpy as np
-import tempfile
 import os
 import json
 import logging
-from cloudvolume import Skeleton as CloudVolumeSkeleton
-from neuroglancer.skeleton import Skeleton as NeuroglancerSkeleton
-from funlib.geometry import Roi
-from kimimaro.postprocess import _remove_ticks
-import fastremap
 import pandas as pd
 from igneous_daskified.util import dask_util, io_util, neuroglancer_util
 import dask.bag as db
 import networkx as nx
 import dask.dataframe as dd
-from neuroglancer.skeleton import VertexAttributeInfo
-from pybind11_rdp import rdp
-import dask
 from igneous_daskified.util.skeleton_util import CustomSkeleton
 
 logging.basicConfig(

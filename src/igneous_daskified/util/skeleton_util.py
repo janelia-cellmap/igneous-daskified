@@ -1,26 +1,13 @@
 # %%
 from dataclasses import dataclass
 import struct
-from funlib.persistence import Array, open_ds
-from funlib.geometry import Roi
 import numpy as np
-import tempfile
 import os
-import json
 import logging
-from cloudvolume import Skeleton as CloudVolumeSkeleton
 from neuroglancer.skeleton import Skeleton as NeuroglancerSkeleton
-from funlib.geometry import Roi
-from kimimaro.postprocess import _remove_ticks
 import fastremap
-import pandas as pd
-from igneous_daskified.util import dask_util, io_util, neuroglancer_util
-import dask.bag as db
 import networkx as nx
-import dask.dataframe as dd
-from neuroglancer.skeleton import VertexAttributeInfo
 from pybind11_rdp import rdp
-import dask
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -375,45 +362,3 @@ class CustomSkeleton:
                 decoded_attributes[attr_name] = attribute
         # 5) Package results.
         return vertex_positions, edges
-
-
-# # %%
-# import pandas as pd
-
-# df = pd.read_csv(
-#     "/nrs/cellmap/ackermand/cellmap/analysisResults/jrc_mus-liver-zon-2/mito_with_skeleton.csv"
-# )
-
-# coords = df[["COM Z (nm)", "COM X (nm)", "COM Y (nm)"]].to_numpy()
-
-# # %%
-# from igneous_daskified.process.skeletons import Skeletonize
-
-# skel = Skeletonize.read_skeleton_from_custom_file("filename")
-# coords.shape
-# # %%
-# ps = np.array([[1, 2, 3], [3, 4, 5], [6, 10, 11], [14, 15, 16]])
-# e1 = np.array([0, 0, 0])
-# e2 = np.array([4, 4, 4])
-# print(
-#     CustomSkeleton.lineseg_dists(
-#         coords,
-#         e1,
-#         e2,
-#     )
-# )
-# a = np.zeros(len(ps))
-# for i, p in enumerate(ps):
-#     a[i] = lineseg_dist(
-#         p,
-#         e1,
-#         e2,
-#     )
-# print(a)
-# # %%
-# lineseg_dist(
-#     ps[1],
-#     e1,
-#     e2,
-# )
-# # %%

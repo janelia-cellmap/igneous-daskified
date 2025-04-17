@@ -73,7 +73,7 @@ int main(int argc, char* argv[])
   }
 
   CGAL_assertion(mesh.is_valid());
-  CGAL::Subdivision_method_3::Loop_subdivision(mesh, 2);
+  CGAL::Subdivision_method_3::Loop_subdivision(mesh, CGAL::parameters::number_of_iterations(2));
 
 
   Skeleton skeleton;

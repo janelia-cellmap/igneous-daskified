@@ -1,5 +1,5 @@
 To compile this code:
-cgal_create_CMakeLists
+./cgal_create_CMakeLists
 
 Add:
 ```
