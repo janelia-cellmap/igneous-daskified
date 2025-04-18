@@ -1,5 +1,5 @@
 import fast_simplification
-from process.analyze_meshes import AnalyzeMeshes
+from .analyze_meshes import AnalyzeMeshes
 from funlib.persistence import open_ds
 from funlib.persistence.arrays.datasets import _read_attrs
 from funlib.geometry import Roi
@@ -16,7 +16,7 @@ from cloudvolume.mesh import Mesh as CloudVolumeMesh
 import pyvista as pv
 import pymeshfix
 import shutil
-from igneous_daskified.process.downsample_numba import (
+from .downsample_numba import (
     downsample_labels_3d_suppress_zero,
 )
 import trimesh
