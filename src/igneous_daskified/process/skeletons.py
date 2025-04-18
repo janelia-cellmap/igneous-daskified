@@ -1,5 +1,7 @@
 # import pymeshlab
 
+from pathlib import Path
+import subprocess
 from funlib.persistence import open_ds
 import numpy as np
 import os
@@ -46,6 +48,32 @@ class Skeletonize:
         self.simplification_tolerance_nm = simplification_tolerance_nm
 
     @staticmethod
+    def cgal_skeletonize_mesh(input_file: str, output_file: str) -> None:
+        """
+        Invoke the CGAL skeletonizer binary on `input_file` (eg. ply or obj), writing to `output_file`.
+        Raises CalledProcessError on non-zero exit.
+        """
+        # locate the binary in the repo
+        root = Path(__file__).resolve().parent.parent.parent.parent
+        exe = root / "cgal_skeletonize_mesh" / "skeletonize_mesh"
+
+        # build the command
+        cmd = [str(exe), input_file, output_file]
+
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            # this is the non-zero-exit case
+            raise Exception(
+                f"Error in skeletonizing {input_file}; exit status {e.returncode}"
+            ) from e
+        except FileNotFoundError as e:
+            # binary not found / not executable
+            raise Exception(
+                f"Error in skeletonizing {input_file}; could not find or execute {exe}"
+            ) from e
+
+    @staticmethod
     def read_skeleton_from_custom_file(filename):
         vertices = []
         edges = []
@@ -75,13 +103,7 @@ class Skeletonize:
         os.makedirs(f"{self.output_directory}/cgal", exist_ok=True)
         mesh_id = mesh.split(".")[0]
         output_file = f"{self.output_directory}/cgal/{mesh_id}.txt"
-        exit_status = os.system(
-            f"/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/cgal_skeletonize_mesh/skeletonize_mesh {input_file} {output_file}"
-        )
-        if exit_status:
-            raise Exception(
-                f"Error in skeletonizing {input_file}; exit status {os.WEXITSTATUS(exit_status)}"
-            )
+        Skeletonize.cgal_skeletonize_mesh(input_file, output_file)
 
     def process_custom_skeleton_df(self, df):
         results_df = []

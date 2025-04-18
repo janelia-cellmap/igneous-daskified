@@ -18,6 +18,7 @@ license     = { file = "LICENSE.txt" }
 dependencies = [
   "bokeh",
   "cloud-volume",
+  "cmake",
   "dask",
   "dask-jobqueue",
   "distributed",
@@ -28,6 +29,7 @@ dependencies = [
   "numba",
   "pandas",
   "pyarrow",
+  "pybind11-rdp",
   "pymeshlab",
   "pymeshfix",
   "scipy",
@@ -40,10 +42,4 @@ dependencies = [
 meshify        = "igneous_daskified.process.cli:meshify"
 skeletonize    = "igneous_daskified.process.cli:skeletonize"
 analyze-meshes = "igneous_daskified.process.cli:analyze_meshes"
-
-[project.optional-dependencies]
-# Pull in CMake & PyBind11 only when you really need skeleton rebuilding
-all = [
-  "cmake",        # pip‑installable CMake wrapper/binaries
-  "pybind11-rdp", # for C++ binding support
-]
+cgal-skeletonize-mesh = "igneous_daskified.process.cli:cgal_skeletonize_mesh"
