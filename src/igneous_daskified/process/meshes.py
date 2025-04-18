@@ -1,5 +1,5 @@
 import fast_simplification
-from igneous_daskified.process.analyze import AnalyzeMeshes
+from process.analyze_meshes import AnalyzeMeshes
 from funlib.persistence import open_ds
 from funlib.persistence.arrays.datasets import _read_attrs
 from funlib.geometry import Roi

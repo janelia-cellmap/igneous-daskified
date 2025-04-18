@@ -69,10 +69,10 @@ def meshify():
 
 
 def analyze_meshes():
-    from .analyze import AnalyzeMeshes
+    from .analyze_meshes import AnalyzeMeshes
 
     rp = RunProperties()
-    # Start analsis
+    # Start analysis
     with io_util.tee_streams(rp.logpath):
         os.chdir(rp.execution_directory)
         analyze_meshes = AnalyzeMeshes(**rp.run_config)
