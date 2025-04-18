@@ -183,7 +183,7 @@ class Meshify:
             if do_simplification:
                 # logger.warning("simplifying mesh")
                 simplified_mesh = fast_simplification.simplify_mesh(
-                    mesh, target_count=target_count, agg=aggressiveness, verbose=True
+                    mesh, target_count=target_count, agg=aggressiveness, verbose=False
                 )
                 # logger.warning("simplified")
             else:
@@ -251,10 +251,10 @@ class Meshify:
 
         min_faces = 100
         # simplify mesh
-        target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
+        target_count = max(int(mesh.n_cells * (1 - target_reduction)), min_faces)
         if do_simplification:
             # check to make sure it is actually necessary
-            do_simplification = mesh.n_faces > min_faces
+            do_simplification = mesh.n_cells > min_faces
         vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
             mesh, target_count, aggressiveness, do_simplification
         )
@@ -292,12 +292,12 @@ class Meshify:
 
         if do_simplification and aggressiveness == -2:
             logger.warning(
-                f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) had to be processed unsimplified."
+                f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) had to be processed unsimplified."
             )
 
         if len(fclean) == 0:
             raise Exception(
-                f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
+                f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
             )
 
         output_trimesh_mesh.vertices += com
