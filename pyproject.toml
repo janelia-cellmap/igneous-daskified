@@ -1,19 +1,45 @@
 [project]
 name = "igneous-daskified"
 version = "0.0.1"
-
 requires-python = ">=3.10"
+
 authors = [
-  {name = "David Ackerman", email = "ackermand@janelia.hhmi.org"},
+  { name = "David Ackerman", email = "ackermand@janelia.hhmi.org" },
 ]
 maintainers = [
-  {name = "David Ackerman", email = "ackermand@janelia.hhmi.org"},
+  { name = "David Ackerman", email = "ackermand@janelia.hhmi.org" },
 ]
+
 description = "Daskifying igneous skeletonization and mesh generation"
-readme = "README.md"
-license = {file = "LICENSE.txt"}
+readme      = "README.md"
+license     = { file = "LICENSE.txt" }
+
+# Core runtime dependencies
+dependencies = [
+  "bokeh",
+  "cloud-volume",
+  "cmake",
+  "dask",
+  "dask-jobqueue",
+  "distributed",
+  "fast-simplification",
+  "funlib.geometry",
+  "funlib.persistence==0.3.0",
+  "neuroglancer",
+  "numba",
+  "pandas",
+  "pyarrow",
+  "pybind11-rdp",
+  "pymeshlab",
+  "pymeshfix",
+  "scipy",
+  "trimesh",
+  "zarr==2.18.5",
+  "zmesh",
+]
 
 [project.scripts]
-meshify = "igneous_daskified.process.cli:meshify"
-skeletonize = "igneous_daskified.process.cli:skeletonize"
+meshify        = "igneous_daskified.process.cli:meshify"
+skeletonize    = "igneous_daskified.process.cli:skeletonize"
 analyze-meshes = "igneous_daskified.process.cli:analyze_meshes"
+cgal-skeletonize-mesh = "igneous_daskified.process.cli:cgal_skeletonize_mesh"

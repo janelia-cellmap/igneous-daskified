@@ -1,4 +1,7 @@
+import argparse
 import os
+from pathlib import Path
+import subprocess
 from igneous_daskified.util import dask_util, io_util
 import logging
 import sys
@@ -46,6 +49,18 @@ class RunProperties:
         self.run_config["num_workers"] = args.num_workers
 
 
+def cgal_skeletonize_mesh():
+    from .skeletons import Skeletonize
+
+    parser = argparse.ArgumentParser(
+        prog="skeletonize_mesh", description="Run the CGAL skeletonizer on a mesh"
+    )
+    parser.add_argument("input_file", help="Path to your input mesh (e.g. .obj)")
+    parser.add_argument("output_file", help="Path to write the skeleton output")
+    args = parser.parse_args()
+    Skeletonize.cgal_skeletonize_mesh(args.input_file, args.output_file)
+
+
 def skeletonize():
     from .skeletons import Skeletonize
 
@@ -69,10 +84,10 @@ def meshify():
 
 
 def analyze_meshes():
-    from .analyze import AnalyzeMeshes
+    from .analyze_meshes import AnalyzeMeshes
 
     rp = RunProperties()
-    # Start analsis
+    # Start analysis
     with io_util.tee_streams(rp.logpath):
         os.chdir(rp.execution_directory)
         analyze_meshes = AnalyzeMeshes(**rp.run_config)

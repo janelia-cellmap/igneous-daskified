@@ -18,6 +18,13 @@ from funlib.persistence import open_ds
 import numpy as np
 import io
 import json
+import DracoPy
+import struct
+from cloudvolume.datasource.precomputed.mesh.multilod import (
+    MultiLevelPrecomputedMeshManifest,
+    to_stored_model_space,
+)
+import fastremap
 
 
 # write_ngmesh taken from vol2mesh https://github.com/janelia-flyem/vol2mesh/blob/1b667bcd45423bfb7ea17c42a135931c6decf752/vol2mesh/mesh.py#L1032
@@ -89,6 +96,180 @@ def write_ngmesh_metadata(meshdir):
     os.makedirs(meshdir + "/segment_properties", exist_ok=True)
     with open(meshdir + "/segment_properties/info", "w") as f:
         f.write(json.dumps(segment_properties))
+
+
+def write_index_file(
+    path,
+    grid_origin,
+    fragment_positions,
+    fragment_offsets,
+    current_lod,
+    lods,
+    chunk_shape,
+):
+    """Write the index files for a mesh.
+
+    Args:
+        path: Path to mesh
+        grid_origin: The lod 0 mesh grid origin
+        fragments: Fragments for current lod
+        current_lod: The current lod
+        lods: A list of all the lods
+        chunk_shape: Chunk shape.
+    """
+
+    # since we don't know if the lowest res ones will have meshes for all svs
+    lods = [lod for lod in lods if lod <= current_lod]
+
+    num_lods = len(lods)
+    lod_scales = np.array([2**i for i in range(num_lods)])
+    vertex_offsets = np.array([[0.0, 0.0, 0.0] for _ in range(num_lods)])
+    num_fragments_per_lod = np.array([len(fragment_positions)])
+
+    # if current_lod == lods[0] or not os.path.exists(f"{path}.index"):
+    # then is highest res lod or if the file doesnt exist yet it failed
+    # to write out the index file because s0 was draco compressed to nothing
+    # in encode_faces_to_custom_drc_bytes due to voxel size and chunk shape
+    # build a list of raw byte‐sequences
+    blocks = [
+        chunk_shape.astype("<f").tobytes(),
+        grid_origin.astype("<f").tobytes(),
+        struct.pack("<I", num_lods),
+        lod_scales.astype("<f").tobytes(),
+        vertex_offsets.astype("<f").tobytes(order="C"),
+        num_fragments_per_lod.astype("<I").tobytes(),
+        # fragment positions and offsets
+        np.asarray([fragment_position for fragment_position in fragment_positions])
+        .T.astype("<I")
+        .tobytes(order="C"),
+        np.asarray([fragment_offset for fragment_offset in fragment_offsets])
+        .astype("<I")
+        .tobytes(order="C"),
+    ]
+    with open(f"{path}", "wb") as f:
+        f.writelines(blocks)
+    # else:
+    #    rewrite_index_with_empty_fragments(path, fragments)
+
+
+def to_stored_model_space(
+    vertices: np.ndarray,
+    chunk_shape,
+    grid_origin,
+    fragment_positions,
+    vertex_offsets,
+    lod: int,
+    vertex_quantization_bits: int,
+) -> np.ndarray:
+    """Inverse of from_stored_model_space (see explaination there)."""
+    vertices = vertices.astype(np.float32, copy=False)
+    quant_factor = (2**vertex_quantization_bits) - 1
+
+    stored_model = vertices - grid_origin - vertex_offsets
+    stored_model /= chunk_shape * (2**lod)
+    stored_model -= fragment_positions
+    stored_model *= quant_factor
+    stored_model = np.round(stored_model, out=stored_model)
+    stored_model = np.clip(stored_model, 0, quant_factor, out=stored_model)
+
+    dtype = fastremap.fit_dtype(np.uint64, value=quant_factor)
+    return stored_model.astype(dtype)
+
+
+def write_singleres_multires_files(
+    vertices_xyz, faces, path, vertex_quantization_bits=10, draco_compression_level=10
+):
+    grid_origin = np.min(vertices_xyz, axis=0)
+    chunk_shape = np.max(vertices_xyz, axis=0) - grid_origin
+    # NOTE: should use cloudvolume one
+    vertices_xyz = to_stored_model_space(
+        vertices_xyz,
+        chunk_shape=chunk_shape,
+        grid_origin=grid_origin,
+        fragment_positions=np.array([[0, 0, 0]]),
+        vertex_offsets=np.array([0, 0, 0]),
+        lod=0,
+        vertex_quantization_bits=vertex_quantization_bits,
+    )
+
+    quantization_origin = np.min(vertices_xyz, axis=0)
+    quantization_range = np.max(vertices_xyz, axis=0) - quantization_origin
+    quantization_range = np.max(quantization_range)
+    try:
+        res = DracoPy.encode(
+            vertices_xyz,
+            faces,
+            quantization_bits=vertex_quantization_bits,
+            quantization_range=quantization_range,
+            compression_level=draco_compression_level,
+            quantization_origin=quantization_origin,
+        )
+    except DracoPy.EncodingFailedException:
+        res = b""
+
+    # write res to binary file
+    with open(path, "wb") as f:
+        f.write(res)
+
+    write_index_file(
+        f"{path}.index",
+        grid_origin=grid_origin,
+        fragment_positions=[[0, 0, 0]],
+        fragment_offsets=[len(res)],
+        current_lod=0,
+        lods=[0],
+        chunk_shape=chunk_shape,
+    )
+    return res, vertices_xyz
+
+
+def write_singleres_multires_metadata(meshdir):
+    mesh_ids = [f.split(".index")[0] for f in os.listdir(meshdir) if ".index" in f]
+    with open(f"{meshdir}/info", "w") as f:
+        info = {
+            "@type": "neuroglancer_multilod_draco",
+            "vertex_quantization_bits": 10,
+            "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+            "lod_scale_multiplier": 1,
+            "segment_properties": "segment_properties",
+        }
+
+        json.dump(info, f)
+
+    with open(meshdir + "/info", "w") as f:
+        f.write(json.dumps(info))
+
+    segment_properties = {
+        "@type": "neuroglancer_segment_properties",
+        "inline": {
+            "ids": [mesh_id for mesh_id in mesh_ids],
+            "properties": [
+                {"id": "label", "type": "label", "values": [""] * len(mesh_ids)}
+            ],
+        },
+    }
+    os.makedirs(meshdir + "/segment_properties", exist_ok=True)
+    with open(meshdir + "/segment_properties/info", "w") as f:
+        f.write(json.dumps(segment_properties))
+
+
+def write_multires_info_file(path):
+    """Write info file for meshes
+
+    Args:
+        path ('str'): Path to meshes
+    """
+    # default to 10 quantization bits
+    with open(f"{path}/info", "w") as f:
+        info = {
+            "@type": "neuroglancer_multilod_draco",
+            "vertex_quantization_bits": 10,
+            "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+            "lod_scale_multiplier": 1,
+            "segment_properties": "segment_properties",
+        }
+
+        json.dump(info, f)
 
 
 # Much below taken from flyemflows: https://github.com/janelia-flyem/flyemflows/blob/master/flyemflows/util/util.py

@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 class AnalyzeMeshes:
-    """Skeletonize a segmentation array using kimimaro and dask"""
+    """
+    Analyze meshes using trimesh and pymeshlab."""
 
     def __init__(
         self,
@@ -26,6 +27,12 @@ class AnalyzeMeshes:
         output_directory: str,
         num_workers: int = 10,
     ):
+        """
+        Args:
+            input_path (str): Path to the directory containing the meshes.
+            output_directory (str): Path to the directory where the metrics will be saved.
+            num_workers (int): Number of workers to use for parallel processing.
+        """
         self.meshes_dirname = input_path
         self.metrics_dirname = output_directory
         self.num_workers = num_workers

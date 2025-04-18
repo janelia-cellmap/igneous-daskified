@@ -120,9 +120,9 @@ def start_dask(num_workers, msg, logger):
     # Update dask
     with open("dask-config.yaml") as f:
         config = yaml.load(f, Loader=SafeLoader)
-        dask.config.update(dask.config.config, config)
 
-    cluster_type = next(iter(dask.config.config["jobqueue"]))
+    cluster_type = next(iter(config["jobqueue"]))
+    dask.config.update(dask.config.config, config)
     set_local_directory(cluster_type)
 
     if cluster_type == "local":

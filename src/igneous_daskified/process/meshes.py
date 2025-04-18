@@ -1,5 +1,5 @@
 import fast_simplification
-from igneous_daskified.process.analyze import AnalyzeMeshes
+from process.analyze_meshes import AnalyzeMeshes
 from funlib.persistence import open_ds
 from funlib.persistence.arrays.datasets import _read_attrs
 from funlib.geometry import Roi
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class Meshify:
-    """Get a meshes from a zarr or n5 segmentation array"""
+    """Class to create meshes from a segmentation volume using dask and zmesh."""
 
     def __init__(
         self,
@@ -52,7 +52,28 @@ class Meshify:
         do_simplification: bool = True,
         do_analysis: bool = True,
         do_legacy_neuroglancer=False,
+        do_singleres_multires_neuroglancer=False,
     ):
+        """
+        Args:
+            input_path (str): Path to the input segmentation volume.
+            output_directory (str): Path to the output directory.
+            total_roi (Roi): The total ROI to process. If None, the entire volume will be processed.
+            max_num_voxels (int): Maximum number of voxels to process. Default is np.inf.
+            max_num_blocks (int): Maximum number of blocks to process. Default is 20_000.
+            read_write_block_shape_pixels (list): Shape of the blocks to read/write. If None, will use the chunk shape of the input volume.
+            downsample_factor (int | None): Factor to downsample the input volume. If None, no downsampling will be applied.
+            target_reduction (float): Target reduction factor for mesh simplification. Target faces will be (1-target_reduction)*num_faces Default is 0.99.
+            num_workers (int): Number of workers to use for processing. Default is 10.
+            remove_smallest_components (bool): Whether to remove the smallest components from the mesh. Default is True.
+            n_smoothing_iter (int): Number of smoothing iterations to apply to the mesh. Default is 10.
+            default_aggressiveness (int): Default aggressiveness for mesh simplification. Default is 7.
+            check_mesh_validity (bool): Whether to check the validity of the mesh. This is useful most useful if doing downstream analysis. Default is True.
+            do_simplification (bool): Whether to apply mesh simplification. Default is True.
+            do_analysis (bool): Whether to perform analysis on the meshes. Default is True.
+            do_legacy_neuroglancer (bool): Whether to create legacy neuroglancer files. Default is False.
+            do_singleres_multires_neuroglancer (bool): Whether to create single resolution multi-resolution neuroglancer files. Default is False.
+        """
 
         for file_type in [".n5", ".zarr"]:
             if file_type in input_path:
@@ -86,7 +107,6 @@ class Meshify:
         self.output_voxel_size_funlib = max(
             self.base_voxel_size_funlib, Coordinate(1, 1, 1)
         )
-
         self.downsample_factor = downsample_factor
         if self.downsample_factor:
             self.output_voxel_size_funlib = Coordinate(
@@ -100,6 +120,7 @@ class Meshify:
         self.n_smoothing_iter = n_smoothing_iter
         self.do_analysis = do_analysis
         self.do_legacy_neuroglancer = do_legacy_neuroglancer
+        self.do_singleres_multires_neuroglancer = do_singleres_multires_neuroglancer
         self.do_simplification = do_simplification
         self.default_aggressiveness = default_aggressiveness
 
@@ -182,7 +203,7 @@ class Meshify:
             if do_simplification:
                 # logger.warning("simplifying mesh")
                 simplified_mesh = fast_simplification.simplify_mesh(
-                    mesh, target_count=target_count, agg=aggressiveness, verbose=True
+                    mesh, target_count=target_count, agg=aggressiveness, verbose=False
                 )
                 # logger.warning("simplified")
             else:
@@ -250,10 +271,10 @@ class Meshify:
 
         min_faces = 100
         # simplify mesh
-        target_count = max(int(mesh.n_faces * (1 - target_reduction)), min_faces)
+        target_count = max(int(mesh.n_cells * (1 - target_reduction)), min_faces)
         if do_simplification:
             # check to make sure it is actually necessary
-            do_simplification = mesh.n_faces > min_faces
+            do_simplification = mesh.n_cells > min_faces
         vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
             mesh, target_count, aggressiveness, do_simplification
         )
@@ -291,12 +312,12 @@ class Meshify:
 
         if do_simplification and aggressiveness == -2:
             logger.warning(
-                f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) had to be processed unsimplified."
+                f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) had to be processed unsimplified."
             )
 
         if len(fclean) == 0:
             raise Exception(
-                f"Mesh with {mesh.n_faces} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
+                f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
             )
 
         output_trimesh_mesh.vertices += com
@@ -391,9 +412,7 @@ class Meshify:
             )
             mesh.vertices += self.total_roi.offset[::-1]
 
-        if not self.do_legacy_neuroglancer:
-            _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
-        else:
+        if self.do_legacy_neuroglancer:
             io_util.write_ngmesh(
                 mesh.vertices,
                 mesh.faces,
@@ -401,6 +420,12 @@ class Meshify:
             )
             with open(f"{self.output_directory}/meshes/{mesh_id}:0", "w") as f:
                 f.write(json.dumps({"fragments": [f"./{mesh_id}"]}))
+        elif self.do_singleres_multires_neuroglancer:
+            io_util.write_singleres_multires_files(
+                mesh.vertices, mesh.faces, f"{self.output_directory}/meshes/{mesh_id}"
+            )
+        else:
+            _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
         shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
@@ -415,6 +440,8 @@ class Meshify:
                 b.compute()
         if self.do_legacy_neuroglancer:
             io_util.write_ngmesh_metadata(f"{self.output_directory}/meshes")
+        elif self.do_singleres_multires_neuroglancer:
+            io_util.write_singleres_multires_metadata(f"{self.output_directory}/meshes")
         shutil.rmtree(dirname)
 
     def assign_mitos_to_cells(self):
