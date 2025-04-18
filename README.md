@@ -5,6 +5,8 @@ This repository is for creating meshes nad skeletons from segmentations.
 ## Installation
 Install it via `pip install git+https://github.com/janelia-cellmap/igneous-daskified.git@main
 `
+
+### If doing skeletonization
 Skeletonization requires building a custom cgal script, located in cgal_skeletonize_mesh. To build it:
 1. Clone the repository
 2. `cd` to the cgal_skeletonize_mesh directory
