@@ -52,6 +52,7 @@ class Meshify:
         do_simplification: bool = True,
         do_analysis: bool = True,
         do_legacy_neuroglancer=False,
+        do_singleres_multires_neuroglancer=False,
     ):
 
         for file_type in [".n5", ".zarr"]:
@@ -86,7 +87,6 @@ class Meshify:
         self.output_voxel_size_funlib = max(
             self.base_voxel_size_funlib, Coordinate(1, 1, 1)
         )
-
         self.downsample_factor = downsample_factor
         if self.downsample_factor:
             self.output_voxel_size_funlib = Coordinate(
@@ -100,6 +100,7 @@ class Meshify:
         self.n_smoothing_iter = n_smoothing_iter
         self.do_analysis = do_analysis
         self.do_legacy_neuroglancer = do_legacy_neuroglancer
+        self.do_singleres_multires_neuroglancer = do_singleres_multires_neuroglancer
         self.do_simplification = do_simplification
         self.default_aggressiveness = default_aggressiveness
 
@@ -391,9 +392,7 @@ class Meshify:
             )
             mesh.vertices += self.total_roi.offset[::-1]
 
-        if not self.do_legacy_neuroglancer:
-            _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
-        else:
+        if self.do_legacy_neuroglancer:
             io_util.write_ngmesh(
                 mesh.vertices,
                 mesh.faces,
@@ -401,7 +400,13 @@ class Meshify:
             )
             with open(f"{self.output_directory}/meshes/{mesh_id}:0", "w") as f:
                 f.write(json.dumps({"fragments": [f"./{mesh_id}"]}))
-        shutil.rmtree(f"{self.dirname}/{mesh_id}")
+        elif self.do_singleres_multires_neuroglancer:
+            io_util.write_singleres_multires_files(
+                mesh.vertices, mesh.faces, f"{self.output_directory}/meshes/{mesh_id}"
+            )
+        else:
+            _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
+        # shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
         os.makedirs(f"{self.output_directory}/meshes/", exist_ok=True)
@@ -415,6 +420,8 @@ class Meshify:
                 b.compute()
         if self.do_legacy_neuroglancer:
             io_util.write_ngmesh_metadata(f"{self.output_directory}/meshes")
+        elif self.do_singleres_multires_neuroglancer:
+            io_util.write_singleres_multires_metadata(f"{self.output_directory}/meshes")
         shutil.rmtree(dirname)
 
     def assign_mitos_to_cells(self):
