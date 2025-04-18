@@ -31,6 +31,14 @@ class Skeletonize:
         min_branch_length_nm: float = 100,
         simplification_tolerance_nm: float = 50,
     ):
+        """
+        Args:
+            input_directory (str): Path to the directory containing the meshes.
+            output_directory (str): Path to the directory where the skeletons and metrics will be saved.
+            num_workers (int): Number of workers to use for parallel processing.
+            min_branch_length_nm (float): Minimum branch length in nanometers for pruning.
+            simplification_tolerance_nm (float): Tolerance for simplification in nanometers.
+        """
         self.input_directory = input_directory
         self.output_directory = output_directory
         self.num_workers = num_workers

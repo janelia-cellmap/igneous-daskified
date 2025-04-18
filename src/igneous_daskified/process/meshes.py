@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class Meshify:
-    """Get a meshes from a zarr or n5 segmentation array"""
+    """Class to create meshes from a segmentation volume using dask and zmesh."""
 
     def __init__(
         self,
@@ -54,6 +54,26 @@ class Meshify:
         do_legacy_neuroglancer=False,
         do_singleres_multires_neuroglancer=False,
     ):
+        """
+        Args:
+            input_path (str): Path to the input segmentation volume.
+            output_directory (str): Path to the output directory.
+            total_roi (Roi): The total ROI to process. If None, the entire volume will be processed.
+            max_num_voxels (int): Maximum number of voxels to process. Default is np.inf.
+            max_num_blocks (int): Maximum number of blocks to process. Default is 20_000.
+            read_write_block_shape_pixels (list): Shape of the blocks to read/write. If None, will use the chunk shape of the input volume.
+            downsample_factor (int | None): Factor to downsample the input volume. If None, no downsampling will be applied.
+            target_reduction (float): Target reduction factor for mesh simplification. Target faces will be (1-target_reduction)*num_faces Default is 0.99.
+            num_workers (int): Number of workers to use for processing. Default is 10.
+            remove_smallest_components (bool): Whether to remove the smallest components from the mesh. Default is True.
+            n_smoothing_iter (int): Number of smoothing iterations to apply to the mesh. Default is 10.
+            default_aggressiveness (int): Default aggressiveness for mesh simplification. Default is 7.
+            check_mesh_validity (bool): Whether to check the validity of the mesh. This is useful most useful if doing downstream analysis. Default is True.
+            do_simplification (bool): Whether to apply mesh simplification. Default is True.
+            do_analysis (bool): Whether to perform analysis on the meshes. Default is True.
+            do_legacy_neuroglancer (bool): Whether to create legacy neuroglancer files. Default is False.
+            do_singleres_multires_neuroglancer (bool): Whether to create single resolution multi-resolution neuroglancer files. Default is False.
+        """
 
         for file_type in [".n5", ".zarr"]:
             if file_type in input_path:
