@@ -406,7 +406,7 @@ class Meshify:
             )
         else:
             _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
-        # shutil.rmtree(f"{self.dirname}/{mesh_id}")
+        shutil.rmtree(f"{self.dirname}/{mesh_id}")
 
     def assemble_meshes(self, dirname):
         os.makedirs(f"{self.output_directory}/meshes/", exist_ok=True)
