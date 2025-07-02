@@ -157,9 +157,8 @@ class CustomSkeleton:
         branchpoints, _ = CustomSkeleton.find_branchpoints_and_endpoints(g_copy)
         g_copy.remove_nodes_from(branchpoints)
         # if len(branchpoints) > 0:
-        from tqdm import tqdm
 
-        for component in tqdm(nx.connected_components(g_copy)):
+        for component in nx.connected_components(g_copy):
             g_sub = g_copy.subgraph(component)
             polyline = CustomSkeleton.get_polyline_from_subgraph(g_sub, edges)
             polylines.append(polyline)
