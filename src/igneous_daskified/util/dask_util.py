@@ -182,3 +182,12 @@ def setup_execution_directory(config_path, logger):
     print_with_datetime(f"Setup working directory as {execution_dir}.", logger)
 
     return execution_dir
+
+
+def guesstimate_npartitions(elements, num_workers, scaling=10):
+    if not isinstance(elements, int):
+        elements = len(elements)
+    approximate_npartitions = min(elements, num_workers * scaling)
+    elements_per_worker = elements // approximate_npartitions
+    actual_partitions = elements // elements_per_worker
+    return actual_partitions

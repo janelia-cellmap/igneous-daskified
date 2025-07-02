@@ -1,5 +1,5 @@
+# %%
 # import pymeshlab
-
 from pathlib import Path
 import subprocess
 from funlib.persistence import open_ds
@@ -48,30 +48,35 @@ class Skeletonize:
         self.simplification_tolerance_nm = simplification_tolerance_nm
 
     @staticmethod
-    def cgal_skeletonize_mesh(input_file: str, output_file: str) -> None:
-        """
-        Invoke the CGAL skeletonizer binary on `input_file` (eg. ply or obj), writing to `output_file`.
-        Raises CalledProcessError on non-zero exit.
-        """
-        # locate the binary in the repo
-        root = Path(__file__).resolve().parent.parent.parent.parent
+    def cgal_skeletonize_mesh(
+        input_file: str, output_file: str, timeout_seconds: int = 120
+    ) -> None:
+        root = Path(__file__).resolve().parents[3]
         exe = root / "cgal_skeletonize_mesh" / "skeletonize_mesh"
 
-        # build the command
-        cmd = [str(exe), input_file, output_file]
-
-        try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            # this is the non-zero-exit case
-            raise Exception(
-                f"Error in skeletonizing {input_file}; exit status {e.returncode}"
-            ) from e
-        except FileNotFoundError as e:
-            # binary not found / not executable
-            raise Exception(
-                f"Error in skeletonizing {input_file}; could not find or execute {exe}"
-            ) from e
+        max_iter = 5
+        for loop_subdiv in range(1, max_iter + 1):
+            cmd = [str(exe), input_file, output_file, str(loop_subdiv)]
+            try:
+                subprocess.run(cmd, check=True, timeout=timeout_seconds)
+                return  # success!
+            except subprocess.TimeoutExpired as e:
+                if loop_subdiv == max_iter:
+                    raise Exception(
+                        f"Skeletonization timed out after {timeout_seconds}s "
+                        f"with {max_iter} loop_subdivisions"
+                    ) from e
+                print(
+                    f"Timeout at iter={loop_subdiv}; retrying with iter={loop_subdiv+1}"
+                )
+            except subprocess.CalledProcessError as e:
+                raise Exception(
+                    f"Error skeletonizing {input_file}; exit status {e.returncode}"
+                ) from e
+            except FileNotFoundError as e:
+                raise Exception(
+                    f"Could not find or execute skeletonizer at {exe}"
+                ) from e
 
     @staticmethod
     def read_skeleton_from_custom_file(filename):
@@ -100,7 +105,6 @@ class Skeletonize:
 
     def _get_skeleton_from_mesh(self, mesh):
         input_file = f"{self.input_directory}/{mesh}"
-        os.makedirs(f"{self.output_directory}/cgal", exist_ok=True)
         mesh_id = mesh.split(".")[0]
         output_file = f"{self.output_directory}/cgal/{mesh_id}.txt"
         Skeletonize.cgal_skeletonize_mesh(input_file, output_file)
@@ -116,7 +120,9 @@ class Skeletonize:
                     simplification_tolerance_nm=self.simplification_tolerance_nm,
                 )
             except Exception as e:
-                raise Exception(f"Error processing skeleton {row.id}: {e}")
+                raise Exception(
+                    f"Error processing skeleton {self.output_directory}/cgal/{row.id}: {e}"
+                )
             result_df = pd.DataFrame(metrics, index=[0])
             results_df.append(result_df)
 
@@ -157,10 +163,12 @@ class Skeletonize:
         return metrics
 
     def get_skeletons_from_meshes(self):
+        os.makedirs(f"{self.output_directory}/cgal", exist_ok=True)
         meshes = os.listdir(self.input_directory)
         # meshes = [f"{i}.ply" for i in range(1, 1000)]
         b = db.from_sequence(
-            meshes, npartitions=min(self.num_workers * 10, len(meshes))
+            meshes,
+            npartitions=dask_util.guesstimate_npartitions(meshes, self.num_workers),
         ).map(self._get_skeleton_from_mesh)
         with dask_util.start_dask(self.num_workers, "create skeletons", logger):
             with io_util.Timing_Messager("Creating skeletons", logger):
@@ -175,7 +183,10 @@ class Skeletonize:
         for metric in metrics:
             df[metric] = -1.0
 
-        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
+        ddf = dd.from_pandas(
+            df,
+            npartitions=dask_util.guesstimate_npartitions(len(df), self.num_workers),
+        )
 
         meta = pd.DataFrame(columns=df.columns)
         ddf_out = ddf.map_partitions(self.process_custom_skeleton_df, meta=meta)
@@ -405,9 +416,12 @@ class Skeletonize:
             self.all_cells,
             grouped_by_cells=True,
         )
-        b = db.from_sequence(self.all_cells, npartitions=self.num_workers * 10).map(
-            self.group_skeletons_by_cell
-        )
+        b = db.from_sequence(
+            self.all_cells,
+            npartitions=dask_util.guesstimate_npartitions(
+                len(self.all_cells), self.num_workers
+            ),
+        ).map(self.group_skeletons_by_cell)
         with dask_util.start_dask(self.num_workers, "grouping  skeletons", logger):
             with io_util.Timing_Messager("Grouping skeletons with cells", logger):
                 b.compute()
@@ -445,7 +459,9 @@ class Skeletonize:
             }
         )
 
-        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
+        ddf = dd.from_pandas(
+            df, npartitions=dask_util.guesstimate_npartitions(len(df), self.num_workers)
+        )
 
         meta = pd.DataFrame(columns=df.columns)
         ddf_out = ddf.map_partitions(self.get_all_skeleton_information, meta=meta)

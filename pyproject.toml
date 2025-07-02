@@ -21,6 +21,7 @@ dependencies = [
   "cmake",
   "dask",
   "dask-jobqueue",
+  "dracopy",
   "distributed",
   "fast-simplification",
   "funlib.geometry",

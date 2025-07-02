@@ -103,7 +103,7 @@ class CustomSkeleton:
     def find_branchpoints_and_endpoints(graph):
         branchpoints = []
         endpoints = []
-
+        # print("graph.nodes", len(graph.nodes))
         for node in graph.nodes:
             degree = graph.degree[node]
             if degree <= 1:
@@ -157,11 +157,11 @@ class CustomSkeleton:
         branchpoints, _ = CustomSkeleton.find_branchpoints_and_endpoints(g_copy)
         g_copy.remove_nodes_from(branchpoints)
         # if len(branchpoints) > 0:
+
         for component in nx.connected_components(g_copy):
             g_sub = g_copy.subgraph(component)
             polyline = CustomSkeleton.get_polyline_from_subgraph(g_sub, edges)
             polylines.append(polyline)
-
         # if two branchpoints separated by a single edge, teh above would ignore them, so add them back in
         all_edges = []
         for polyline in polylines:
@@ -178,7 +178,6 @@ class CustomSkeleton:
         branchpoints, _ = CustomSkeleton.find_branchpoints_and_endpoints(g)
         current_min_branch_length_nm = np.inf
         current_min_branch_path = None
-
         # for endpoint in endpoints:
         #     for branchpoint in branchpoints:
         #         path_length_nm = nx.shortest_path_length(
@@ -194,6 +193,7 @@ class CustomSkeleton:
         #                 current_min_tick_path = path
 
         polylines_by_vertex_id = CustomSkeleton.get_polylines_from_graph(g)
+
         for polyline_by_vertex_id in polylines_by_vertex_id:
             if (polyline_by_vertex_id[0] in branchpoints) ^ (
                 polyline_by_vertex_id[-1] in branchpoints

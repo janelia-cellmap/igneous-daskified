@@ -67,8 +67,8 @@ CMAKE_BINARY_DIR = /groups/scicompsoft/home/ackermand/Programming/igneous-daskif
 
 # Special rule for the target edit_cache
 edit_cache:
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Running CMake cache editor..."
-	/groups/scicompsoft/home/ackermand/miniconda3/envs/igneous-daskified/bin/ccmake -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR)
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "No interactive CMake dialog available..."
+	/groups/scicompsoft/home/ackermand/miniconda3/envs/basic_igneous_daskified_environment/lib/python3.12/site-packages/cmake/data/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
 .PHONY : edit_cache
 
 # Special rule for the target edit_cache

@@ -5,9 +5,6 @@
 #include <CGAL/boost/graph/generators.h>
 #include <CGAL/IO/Color.h>
 
-
-
-
 #include <iostream>
 #include <fstream>
 
@@ -53,10 +50,24 @@ struct Display_polylines{
   }
 };
 
+
+void print_usage(const char* prog) {
+  std::cerr
+    << "Usage: " << prog << " <input.ply> <output.skel> [loop_subdivision_iterations]\n"
+    << "  <input.ply>                  : your triangulated mesh file\n"
+    << "  <output.skel>                : where to write the skeleton\n"
+    << "  [loop_subdivision_iterations]: optional integer (default 0)\n";
+}
+
+
 // This example extracts a medially centered skeleton from a given mesh.
 
 int main(int argc, char* argv[])
 {
+  if (argc < 3 || argc > 4) {
+    print_usage(argv[0]);
+    return EXIT_FAILURE;
+  }
   std::string comments;
   // create mesh as epick mesh
   std::ifstream input(argv[1]);
@@ -72,9 +83,31 @@ int main(int argc, char* argv[])
     return EXIT_FAILURE;
   }
 
-  CGAL_assertion(mesh.is_valid());
-  CGAL::Subdivision_method_3::Loop_subdivision(mesh, CGAL::parameters::number_of_iterations(2));
+  // parse optional loop subdivision count
+  int loop_subdivision_iterations = 0;
+  if (argc == 4) {
+    try {
+      loop_subdivision_iterations = std::stoi(argv[3]);
+      if (loop_subdivision_iterations < 0) throw std::out_of_range("negative");
+    }
+    catch (const std::invalid_argument&) {
+      std::cerr << "Error: loop_subdivision_iterations must be an integer\n";
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    catch (const std::out_of_range&) {
+      std::cerr << "Error: loop_subdivision_iterations out of range\n";
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+  }
 
+  CGAL_assertion(mesh.is_valid());
+  CGAL_assertion( CGAL::Polygon_mesh_processing::is_connected(mesh) );
+  CGAL_assertion( !CGAL::Polygon_mesh_processing::has_border_edges(mesh) );
+  if (loop_subdivision_iterations > 0){
+    CGAL::Subdivision_method_3::Loop_subdivision(mesh, CGAL::parameters::number_of_iterations(loop_subdivision_iterations));
+  }
 
   Skeleton skeleton;
   CGAL::extract_mean_curvature_flow_skeleton(mesh, skeleton);
@@ -115,6 +148,8 @@ int main(int argc, char* argv[])
       }
       // use a higher precision after the decimal point for the output
       output << "v " << std::fixed << std::setprecision(8) << skeleton[v].point << " " << average_radius << "\n" ;
+      //output << "v " << std::fixed << std::setprecision(std::numeric_limits<double>::digits10) << skeleton[v].point << " " << average_radius << "\n" ;
+
   }
 
   for(Skeleton_edge e : CGAL::make_range(edges(skeleton)))

@@ -7,7 +7,14 @@ project( cgal_skeletonize_mesh )
 
 
 # CGAL and its components
-find_package( CGAL QUIET COMPONENTS  )
+
+# Point at your Conda environment first
+list(INSERT CMAKE_PREFIX_PATH 0 "$ENV{CONDA_PREFIX}")
+set(CGAL_USE_PKGCONFIG OFF CACHE BOOL "" FORCE)
+
+# Find CGAL
+find_package(CGAL 6.0 REQUIRED COMPONENTS Core)
+
 
 if ( NOT CGAL_FOUND )
 
@@ -28,10 +35,10 @@ if ( NOT Boost_FOUND )
 
 endif()
 
-find_package(Eigen3 3.4.0)
-if (EIGEN3_FOUND)
-  include( ${EIGEN3_USE_FILE} )
-endif()
+# Eigen3 integration
+find_package(Eigen3 3.3.7 REQUIRED NO_MODULE)
+include(CGAL_Eigen3_support)   # Defines CGAL::Eigen3_support
+
 
 # include for local directory
 
@@ -43,5 +50,10 @@ endif()
 
 
 create_single_source_cgal_program( "skeletonize_mesh.cpp" )
+# Link in Eigen support
+target_link_libraries(skeletonize_mesh
+  PRIVATE
+    CGAL::Eigen3_support
+)
 
 

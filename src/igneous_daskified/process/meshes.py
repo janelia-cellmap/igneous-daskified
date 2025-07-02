@@ -1,5 +1,6 @@
+# %%
 import fast_simplification
-from .analyze_meshes import AnalyzeMeshes
+from igneous_daskified.process.analyze_meshes import AnalyzeMeshes
 from funlib.persistence import open_ds
 from funlib.persistence.arrays.datasets import _read_attrs
 from funlib.geometry import Roi
@@ -16,7 +17,7 @@ from cloudvolume.mesh import Mesh as CloudVolumeMesh
 import pyvista as pv
 import pymeshfix
 import shutil
-from .downsample_numba import (
+from igneous_daskified.process.downsample_numba import (
     downsample_labels_3d_suppress_zero,
 )
 import trimesh
@@ -40,7 +41,7 @@ class Meshify:
         output_directory: str,
         total_roi: Roi = None,
         max_num_voxels=np.inf,  # 50 * 512**3,  # 500 blocks times 512*512*512
-        max_num_blocks=20_000,
+        max_num_blocks=np.inf,  # 200_000,
         read_write_block_shape_pixels: list = None,
         downsample_factor: int | None = None,
         target_reduction: float = 0.99,
@@ -145,7 +146,10 @@ class Meshify:
         mesher = Mesher(self.output_voxel_size_funlib[::-1])  # anisotropy of image
         segmentation_block = self.segmentation_array.to_ndarray(block.roi)
         if segmentation_block.dtype.byteorder == ">":
-            segmentation_block = segmentation_block.newbyteorder().byteswap()
+            # get the opposite-endian dtype
+            swapped_dtype = segmentation_block.dtype.newbyteorder()
+            # reinterpret the data as that dtype and swap the bytes
+            segmentation_block = segmentation_block.view(swapped_dtype).byteswap()
         if self.downsample_factor:
             segmentation_block, _ = downsample_labels_3d_suppress_zero(
                 segmentation_block, self.downsample_factor
@@ -208,7 +212,7 @@ class Meshify:
                 # logger.warning("simplified")
             else:
                 simplified_mesh = mesh
-
+            del mesh
             if n_smoothing_iter > 0:
                 simplified_mesh = simplified_mesh.smooth_taubin(n_smoothing_iter)
             # logger.warning("smoothed")
@@ -225,6 +229,7 @@ class Meshify:
                 remove_smallest_components=remove_smallest_components,
                 verbose=True,
             )
+            del simplified_mesh
             # logger.warning("cleaned")
             # else:
             #     return (
@@ -253,6 +258,7 @@ class Meshify:
 
         vertices = mesh.vertices - com
         faces = mesh.faces
+
         # print(f"Initial mesh has {len(faces)} faces")
         output_trimesh_mesh = trimesh.Trimesh(vertices, faces)
         # print(f"output mesh")
@@ -272,6 +278,7 @@ class Meshify:
         min_faces = 100
         # simplify mesh
         target_count = max(int(mesh.n_cells * (1 - target_reduction)), min_faces)
+        print(f"Target count: {target_count} faces, aggressiveness: {aggressiveness}, mesh has {mesh.n_cells} faces")
         if do_simplification:
             # check to make sure it is actually necessary
             do_simplification = mesh.n_cells > min_faces
@@ -280,21 +287,28 @@ class Meshify:
         )
         # logger.warning(f"got vclean and fclean: len(fclean)={len(fclean)}")
         trimesh_mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+        retry_simplification_for_validity = False
         if check_mesh_validity:
             if Meshify.is_mesh_valid(trimesh_mesh):
                 output_trimesh_mesh = trimesh_mesh
+            else:
+                retry_simplification_for_validity = True
         else:
             output_trimesh_mesh = trimesh_mesh
+        del trimesh_mesh
         # logger.warning(f"trimeshed")
 
         aggressiveness -= 1
         # initially would redo only if fclean==0, but noticed that sometimes it simplifies weird structures to a single face which isnt good
         # also need to check if mesh is valid after simplification
         while (
-            len(fclean) < 0.5 * target_count
+            (len(fclean) < 0.5 * target_count
+            or retry_simplification_for_validity)
             and aggressiveness >= -1
             and do_simplification
+            
         ):
+            print("aggressiveness:", aggressiveness)
             # if aggressiveness is <0, then we want to try without simplification
             vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
                 mesh,
@@ -307,6 +321,7 @@ class Meshify:
             if check_mesh_validity:
                 if Meshify.is_mesh_valid(trimesh_mesh):
                     output_trimesh_mesh = trimesh_mesh
+                    retry_simplification_for_validity = False
             else:
                 output_trimesh_mesh = trimesh_mesh
 
@@ -364,7 +379,7 @@ class Meshify:
                 mesh = Meshify.my_cloudvolume_concatenate(*block_meshes)
             except Exception as e:
                 raise Exception(f"{mesh_id} failed, with error: {e}")
-
+            del block_meshes
             # doing both of the following may be redundant
             mesh = mesh.consolidate()  # if you don't have self-contacts
             chunk_size = (
@@ -376,16 +391,19 @@ class Meshify:
             )
 
         if self.check_mesh_validity:
-            mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
+            try:
+                mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
 
-            # further cleanup attempts
-            vclean, fclean = pymeshfix.clean_from_arrays(
-                mesh.vertices,
-                mesh.faces,
-                remove_smallest_components=self.remove_smallest_components,
-            )
+                # further cleanup attempts
+                vclean, fclean = pymeshfix.clean_from_arrays(
+                    mesh.vertices,
+                    mesh.faces,
+                    remove_smallest_components=self.remove_smallest_components,
+                )
 
-            mesh = trimesh.Trimesh(vclean, fclean)
+                mesh = trimesh.Trimesh(vclean, fclean)
+            except Exception as e:
+                raise Exception(f"{mesh_id} failed, with error: {e}")
 
         # simplify and smooth the final mesh
         try:
@@ -433,7 +451,8 @@ class Meshify:
         self.dirname = dirname
         mesh_ids = os.listdir(dirname)
         b = db.from_sequence(
-            mesh_ids, npartitions=min(self.num_workers * 10, len(mesh_ids))
+            mesh_ids,
+            npartitions=dask_util.guesstimate_npartitions(mesh_ids, self.num_workers),
         ).map(self._assemble_mesh)
         with dask_util.start_dask(self.num_workers, "assemble meshes", logger):
             with io_util.Timing_Messager("Assembling meshes", logger):
@@ -478,3 +497,4 @@ class Meshify:
                 self.output_directory + "/meshes", self.output_directory + "/metrics"
             )
             analyze.analyze()
+
