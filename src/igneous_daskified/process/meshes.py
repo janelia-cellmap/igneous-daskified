@@ -243,7 +243,7 @@ class Meshify:
             if type(mesh) != trimesh.base.Trimesh:
                 mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
 
-            components = mesh.split()
+            components = mesh.split(only_watertight=check_mesh_validity)
 
             if len(components) > 0:
                 # this will equal zero if not watertight?
@@ -278,7 +278,7 @@ class Meshify:
         min_faces = 100
         # simplify mesh
         target_count = max(int(mesh.n_cells * (1 - target_reduction)), min_faces)
-        print(f"Target count: {target_count} faces, aggressiveness: {aggressiveness}, mesh has {mesh.n_cells} faces")
+
         if do_simplification:
             # check to make sure it is actually necessary
             do_simplification = mesh.n_cells > min_faces
@@ -302,11 +302,9 @@ class Meshify:
         # initially would redo only if fclean==0, but noticed that sometimes it simplifies weird structures to a single face which isnt good
         # also need to check if mesh is valid after simplification
         while (
-            (len(fclean) < 0.5 * target_count
-            or retry_simplification_for_validity)
+            (len(fclean) < 0.5 * target_count or retry_simplification_for_validity)
             and aggressiveness >= -1
             and do_simplification
-            
         ):
             print("aggressiveness:", aggressiveness)
             # if aggressiveness is <0, then we want to try without simplification
@@ -497,4 +495,3 @@ class Meshify:
                 self.output_directory + "/meshes", self.output_directory + "/metrics"
             )
             analyze.analyze()
-
