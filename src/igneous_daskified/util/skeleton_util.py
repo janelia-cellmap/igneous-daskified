@@ -45,10 +45,12 @@ class CustomSkeleton:
         if type(vertex) is not tuple:
             vertex = tuple(vertex)
 
-        if vertex not in self.vertices:
-            self.vertices.append(vertex)
-            if radius:
-                self.radii.append(radius)
+        # if vertex not in self.vertices:
+        self.vertices.append(vertex)
+        if radius:
+            self.radii.append(radius)
+        # else:
+        #    print(f"Vertex {vertex} already in skeleton, not adding")
 
     def add_vertices(self, vertices, radii):
         if radii:
@@ -233,9 +235,15 @@ class CustomSkeleton:
         g.add_edges_from(self.edges)
         # add edge weights to the graph where weights are the distances between vertices
         for edge in self.edges:
-            g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
-                np.array(self.vertices[edge[0]]) - np.array(self.vertices[edge[1]])
-            )
+            try:
+                g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
+                    np.array(self.vertices[edge[0]]) - np.array(self.vertices[edge[1]])
+                )
+            except IndexError as e:
+                logger.error(
+                    f"IndexError when trying to access vertices for edge {edge} with vertices length {len(self.vertices)}"
+                )
+                raise e
 
         return g
 
@@ -362,3 +370,6 @@ class CustomSkeleton:
                 decoded_attributes[attr_name] = attribute
         # 5) Package results.
         return vertex_positions, edges
+
+
+# %%

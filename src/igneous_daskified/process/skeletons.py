@@ -100,7 +100,6 @@ class Skeletonize:
                     for v in data[1:]:
                         polyline = np.append(polyline, vertices[int(v)])
                     polylines.append(polyline.reshape(-1, 3))
-
         return CustomSkeleton(vertices, edges, radii, polylines)
 
     def _get_skeleton_from_mesh(self, mesh):
