@@ -1,7 +1,6 @@
 # cgal
 cgal_skeletonize_mesh/*
 !cgal_skeletonize_mesh/skeletonize_mesh.cpp
-!cgal_skeletonize_mesh/Makefile
 !cgal_skeletonize_mesh/CMakeLists.txt
 !cgal_skeletonize_mesh/README.md
 
