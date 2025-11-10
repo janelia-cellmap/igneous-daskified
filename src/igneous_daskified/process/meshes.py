@@ -24,12 +24,49 @@ import trimesh
 import json
 from funlib.geometry import Coordinate
 
+# import igneous_daskified.process.fixed_edge_meshes
+# from importlib import reload
+
+# reload(igneous_daskified.process.fixed_edge_meshes)
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
     level=logging.INFO,
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Import fixed edge mesh utilities
+try:
+    from igneous_daskified.process.fixed_edge_meshes import (
+        fqmr_simplify,
+        repair_cleanup,
+        weld_vertices,
+        denoise_seams_inplace,
+        simplify_block_preserve_edges,
+    )
+
+    FIXED_EDGE_AVAILABLE = True
+except ImportError as e:
+    FIXED_EDGE_AVAILABLE = False
+    logger.warning(
+        f"Fixed edge mesh utilities not available: {e}. Fixed edge simplification will not work."
+    )
+
+
+def staged_reductions(target_reduction_total, frac1, frac2):
+    """
+    Compute per-stage reductions (r1, r2) given how much of the total reduction
+    each stage should contribute.
+
+    target_reduction_total: overall target reduction (e.g. 0.99)
+    frac1, frac2: relative fractions of total simplification (e.g. 0.25, 0.75)
+    """
+    assert abs(frac1 + frac2 - 1.0) < 1e-6, "fractions must sum to 1"
+    keep_total = 1 - target_reduction_total
+
+    r1 = 1 - keep_total**frac1
+    r2 = 1 - keep_total**frac2
+    return r1, r2
 
 
 class Meshify:
@@ -54,6 +91,13 @@ class Meshify:
         do_analysis: bool = True,
         do_legacy_neuroglancer=False,
         do_singleres_multires_neuroglancer=False,
+        use_fixed_edge_simplification: bool = False,
+        fixed_edge_merge_weld_epsilon: float = 1e-4,
+        fixed_edge_seam_angle_deg: float = 35.0,
+        fixed_edge_k_ring: int = 2,
+        fixed_edge_taubin_iters: int = 12,
+        fixed_edge_taubin_lambda: float = 0.5,
+        fixed_edge_taubin_mu: float = -0.53,
     ):
         """
         Args:
@@ -74,6 +118,13 @@ class Meshify:
             do_analysis (bool): Whether to perform analysis on the meshes. Default is True.
             do_legacy_neuroglancer (bool): Whether to create legacy neuroglancer files. Default is False.
             do_singleres_multires_neuroglancer (bool): Whether to create single resolution multi-resolution neuroglancer files. Default is False.
+            use_fixed_edge_simplification (bool): Whether to use edge-constrained simplification during block processing and seam cleanup during merging. Default is False.
+            fixed_edge_merge_weld_epsilon (float): Vertex welding tolerance when merging blocks with fixed edge approach. Default is 1e-4.
+            fixed_edge_seam_angle_deg (float): Dihedral angle threshold (degrees) for seam detection with fixed edge approach. Default is 35.0.
+            fixed_edge_k_ring (int): K-ring expansion for seam smoothing band with fixed edge approach. Default is 2.
+            fixed_edge_taubin_iters (int): Taubin smoothing iterations for seam denoising with fixed edge approach. Default is 12.
+            fixed_edge_taubin_lambda (float): Taubin smoothing lambda parameter for fixed edge approach. Default is 0.5.
+            fixed_edge_taubin_mu (float): Taubin smoothing mu parameter for fixed edge approach. Default is -0.53.
         """
 
         for file_type in [".n5", ".zarr"]:
@@ -125,6 +176,23 @@ class Meshify:
         self.do_simplification = do_simplification
         self.default_aggressiveness = default_aggressiveness
 
+        # Fixed edge simplification parameters
+        self.use_fixed_edge_simplification = use_fixed_edge_simplification
+        if self.use_fixed_edge_simplification and not FIXED_EDGE_AVAILABLE:
+            raise RuntimeError(
+                "Fixed edge simplification requested but dependencies not available. "
+                "Ensure fixed_edge_meshes.py is present and pyfqmr is installed (`pip install pyfqmr`)."
+            )
+        self.fixed_edge_merge_weld_epsilon = fixed_edge_merge_weld_epsilon
+        self.fixed_edge_seam_angle_deg = fixed_edge_seam_angle_deg
+        self.fixed_edge_k_ring = fixed_edge_k_ring
+        self.fixed_edge_taubin_iters = fixed_edge_taubin_iters
+        self.fixed_edge_taubin_lambda = fixed_edge_taubin_lambda
+        self.fixed_edge_taubin_mu = fixed_edge_taubin_mu
+
+        self.stage_1_reduction_fraction = 0.5
+        self.stage_2_reduction_fraction = 0.5
+
     @staticmethod
     def my_cloudvolume_concatenate(*meshes):
         # The default cloudvolume concatenate requires normals, which we do not
@@ -144,7 +212,7 @@ class Meshify:
 
     def _get_chunked_mesh(self, block, tmpdirname):
         mesher = Mesher(self.output_voxel_size_funlib[::-1])  # anisotropy of image
-        segmentation_block = self.segmentation_array.to_ndarray(block.roi)
+        segmentation_block = self.segmentation_array.to_ndarray(block.roi, fill_value=0)
         if segmentation_block.dtype.byteorder == ">":
             # get the opposite-endian dtype
             swapped_dtype = segmentation_block.dtype.newbyteorder()
@@ -162,10 +230,66 @@ class Meshify:
         mesher.mesh(segmentation_block, close=False)
         for id in mesher.ids():
             mesh = mesher.get_mesh(id)
-            mesh.vertices += block_offset[::-1]
             os.makedirs(f"{tmpdirname}/{id}", exist_ok=True)
-            with open(f"{tmpdirname}/{id}/block_{block.index}.ply", "wb") as fp:
-                fp.write(mesh.to_ply())
+
+            # If using fixed edge simplification, simplify per-block with border preservation
+            if self.use_fixed_edge_simplification and self.do_simplification:
+                # try:
+                # Convert to trimesh
+                mesh_tri = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
+
+                # Calculate target reduction based on target_reduction
+                stage_1_reduction, _ = staged_reductions(
+                    self.target_reduction,
+                    self.stage_1_reduction_fraction,
+                    self.stage_2_reduction_fraction,
+                )
+
+                # Calculate block size and offset for boundary removal
+                # Block size in voxels (without halo)
+                block_size_voxels = (
+                    self.read_write_block_shape_pixels + 1
+                )  # starts at 0
+                # ROI offset for this block (in world coordinates, z,y,x order to match vertices)
+                # Block size in world coordinates (z,y,x order)
+                block_size_world = (block_size_voxels * self.output_voxel_size_funlib)[
+                    ::-1
+                ]
+
+                # Simplify with positive-face boundary removal
+                mesh_tri_simplified = simplify_block_preserve_edges(
+                    mesh_tri,
+                    voxel_size=self.output_voxel_size_funlib,
+                    target_reduction=stage_1_reduction,
+                    block_size=block_size_world,
+                    aggressiveness=max(
+                        0, self.default_aggressiveness - 1
+                    ),  # be less aggressive in first pass
+                    verbose=False,
+                )
+                mesh_tri_simplified.vertices += block_offset[::-1]
+
+                # Create a new CloudVolumeMesh with simplified data and write using CloudVolumeMesh format
+                # This ensures compatibility with CloudVolumeMesh.from_ply() during assembly
+                mesh_simplified = CloudVolumeMesh(
+                    mesh_tri_simplified.vertices,
+                    mesh_tri_simplified.faces,
+                    normals=None,
+                )
+
+                with open(f"{tmpdirname}/{id}/block_{block.index}.ply", "wb") as fp:
+                    fp.write(mesh_simplified.to_ply())
+                # except Exception as e:
+                #     logger.warning(
+                #         f"Fixed edge simplification failed for block {block.index}, id {id}: {e}. Using unsimplified mesh."
+                #     )
+                #     # Fall back to original mesh
+                #     with open(f"{tmpdirname}/{id}/block_{block.index}.ply", "wb") as fp:
+                #         fp.write(mesh.to_ply())
+            else:
+                mesh.vertices += block_offset[::-1]
+                with open(f"{tmpdirname}/{id}/block_{block.index}.ply", "wb") as fp:
+                    fp.write(mesh.to_ply())
 
     @staticmethod
     def is_mesh_valid(mesh):
@@ -178,7 +302,7 @@ class Meshify:
         blocks = dask_util.create_blocks(
             self.total_roi,
             self.segmentation_array,
-            self.read_write_block_shape_pixels,
+            self.read_write_block_shape_pixels.copy(),
             padding=self.output_voxel_size_funlib,
         )
 
@@ -366,54 +490,203 @@ class Meshify:
 
             shutil.rmtree(f"{self.dirname}/{mesh_id}")
             return
-
+        print("loading meshes")
         for mesh_file in mesh_files:
+            # if self.use_fixed_edge_simplification:
+            #     # When using fixed edge simplification, PLY files are written by trimesh
+            #     # Load with trimesh and convert to zmesh-compatible format
+            #     mesh_tri = trimesh.load(f"{self.dirname}/{mesh_id}/{mesh_file}", process=False)
+            #     # Convert to CloudVolumeMesh-like object that can be concatenated
+            #     mesh = Zmesh(mesh_tri.vertices, mesh_tri.faces)
+            #     block_meshes.append(mesh)
+            # else:
+            #     # Standard path: PLY files written by Zmesh
             with open(f"{self.dirname}/{mesh_id}/{mesh_file}", "rb") as f:
                 mesh = Zmesh.from_ply(f.read())
                 block_meshes.append(mesh)
+        num_blocks = len(block_meshes)  # Store for later use
 
         if len(block_meshes) > 1:
+            print("concatenating meshes")
             try:
                 mesh = Meshify.my_cloudvolume_concatenate(*block_meshes)
             except Exception as e:
                 raise Exception(f"{mesh_id} failed, with error: {e}")
             del block_meshes
+            print("concatenated meshes")
             # doing both of the following may be redundant
             mesh = mesh.consolidate()  # if you don't have self-contacts
             chunk_size = (
                 self.read_write_block_shape_pixels * self.base_voxel_size_funlib
             )
+            print("deduplicating chunk boundaries")
             mesh = mesh.deduplicate_chunk_boundaries(
                 chunk_size=chunk_size[::-1],
                 offset=self.total_roi.offset[::-1],
             )
+            print("deduplicated chunk boundaries")
+
+            # # If using fixed edge approach, weld vertices and denoise seams after merging
+            # if self.use_fixed_edge_simplification:
+            #     try:
+            #         # Convert to trimesh for processing
+            #         mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
+
+            #         # Calculate block boundaries for targeted vertex welding
+            #         # Only weld vertices near block boundaries to save computation
+            #         block_size = (
+            #             self.read_write_block_shape_pixels * self.base_voxel_size_funlib
+            #         )[::-1]  # Convert to z,y,x order
+
+            #         # Weld vertices at block boundaries (only near boundaries)
+            #         mesh = weld_vertices(
+            #             mesh,
+            #             epsilon=self.fixed_edge_merge_weld_epsilon,
+            #             block_size=block_size,
+            #             roi_offset=self.total_roi.offset[::-1],
+            #             verbose=False
+            #         )
+
+            #         # Detect and smooth seams
+            #         denoise_seams_inplace(
+            #             mesh,
+            #             seam_angle_deg=self.fixed_edge_seam_angle_deg,
+            #             k_ring=self.fixed_edge_k_ring,
+            #             taubin_iters=self.fixed_edge_taubin_iters,
+            #             lamb=self.fixed_edge_taubin_lambda,
+            #             mu=self.fixed_edge_taubin_mu,
+            #             verbose=False,
+            #         )
+            #     except Exception as e:
+            #         logger.warning(
+            #             f"Fixed edge welding/denoising failed for mesh {mesh_id}: {e}. Continuing with standard processing."
+            #         )
+            #         # Convert back to CloudVolumeMesh format if it was trimesh
+            #         if isinstance(mesh, trimesh.Trimesh):
+            #             mesh = CloudVolumeMesh(
+            #                 vertices=mesh.vertices, faces=mesh.faces, normals=None
+            #             )
 
         if self.check_mesh_validity:
             try:
                 mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
 
-                # further cleanup attempts
-                vclean, fclean = pymeshfix.clean_from_arrays(
-                    mesh.vertices,
-                    mesh.faces,
-                    remove_smallest_components=self.remove_smallest_components,
-                )
-
-                mesh = trimesh.Trimesh(vclean, fclean)
+                # Add defensive checks before pymeshfix to prevent segfaults
+                if len(mesh.faces) == 0:
+                    logger.warning(
+                        f"Mesh {mesh_id} has no faces, skipping pymeshfix cleanup"
+                    )
+                elif len(mesh.vertices) == 0:
+                    logger.warning(
+                        f"Mesh {mesh_id} has no vertices, skipping pymeshfix cleanup"
+                    )
+                elif len(mesh.faces) > 10_000_000:
+                    logger.warning(
+                        f"Mesh {mesh_id} has {len(mesh.faces)} faces (>10M), skipping pymeshfix to avoid segfault"
+                    )
+                else:
+                    # further cleanup attempts
+                    print("cleaning mesh")
+                    # Ensure correct dtypes to prevent memory corruption
+                    vertices_clean = np.ascontiguousarray(
+                        mesh.vertices, dtype=np.float64
+                    )
+                    faces_clean = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+                    # write out pre-cleaned mesh for debugging
+                    # _ = mesh.export(
+                    #     f"{self.output_directory}/meshes/{mesh_id}_precleaned.ply"
+                    # )
+                    try:
+                        vclean, fclean = pymeshfix.clean_from_arrays(
+                            vertices_clean,
+                            faces_clean,
+                            remove_smallest_components=self.remove_smallest_components,
+                        )
+                        print("cleaned mesh")
+                        mesh = trimesh.Trimesh(vclean, fclean)
+                    except Exception as pymeshfix_error:
+                        logger.warning(
+                            f"pymeshfix failed for mesh {mesh_id}: {pymeshfix_error}. Continuing with uncleaned mesh."
+                        )
+                        # Continue with the original mesh if pymeshfix fails
             except Exception as e:
                 raise Exception(f"{mesh_id} failed, with error: {e}")
 
         # simplify and smooth the final mesh
         try:
-            mesh = Meshify.simplify_and_smooth_mesh(
-                mesh,
-                self.target_reduction,
-                self.n_smoothing_iter,
-                self.remove_smallest_components,
-                self.default_aggressiveness,
-                self.do_simplification,
-                self.check_mesh_validity,
-            )
+            if self.use_fixed_edge_simplification and self.do_simplification:
+                stage_2_reduction, _ = staged_reductions(
+                    self.target_reduction,
+                    self.stage_1_reduction_fraction,
+                    self.stage_2_reduction_fraction,
+                )
+                mesh = Meshify.simplify_and_smooth_mesh(
+                    mesh,
+                    stage_2_reduction,
+                    self.n_smoothing_iter,
+                    self.remove_smallest_components,
+                    self.default_aggressiveness,
+                    self.do_simplification,
+                    self.check_mesh_validity,
+                )
+            # # If using fixed edge approach and have already done per-block simplification,
+            # # do a final global simplification without border constraints
+            # if (
+            #     self.use_fixed_edge_simplification
+            #     and self.do_simplification
+            #     and num_blocks > 1
+            # ):
+            #     # Ensure mesh is trimesh format
+            #     if not isinstance(mesh, trimesh.Trimesh):
+            #         mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
+
+            #     # Global simplification with no border constraints
+            #     stage_2_reduction, _ = staged_reductions(
+            #         self.target_reduction,
+            #         self.stage_1_reduction_fraction,
+            #         self.stage_2_reduction_fraction,
+            #     )
+            #     target_faces = int(max(4, len(mesh.faces) * (1 - stage_2_reduction)))
+            #     v_out, f_out = fqmr_simplify(
+            #         mesh.vertices,
+            #         mesh.faces,
+            #         target_faces=target_faces,
+            #         preserve_border=False,  # Important: no fixed vertices for global pass
+            #         aggressiveness=self.default_aggressiveness,
+            #         verbose=False,
+            #     )
+            #     mesh = trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
+            #     mesh = repair_cleanup(mesh)
+
+            #     # Apply Taubin smoothing if requested (using the constrained version with all vertices)
+            #     if self.n_smoothing_iter > 0:
+            #         # Apply Taubin smoothing to all vertices
+            #         from igneous_daskified.process.fixed_edge_meshes import (
+            #             taubin_constrained,
+            #         )
+
+            #         all_vertices = np.arange(len(mesh.vertices), dtype=np.int32)
+            #         taubin_constrained(
+            #             mesh,
+            #             all_vertices,
+            #             lamb=0.5,
+            #             mu=-0.53,
+            #             iterations=self.n_smoothing_iter,
+            #             verbose=False,
+            #         )
+            # else:
+            # Use standard simplification and smoothing
+            else:
+                mesh = Meshify.simplify_and_smooth_mesh(
+                    mesh,
+                    self.target_reduction,
+                    self.n_smoothing_iter,
+                    self.remove_smallest_components,
+                    self.default_aggressiveness,
+                    self.do_simplification,
+                    self.check_mesh_validity,
+                )
+
             if len(mesh.faces) == 0:
                 _ = mesh.export(f"{self.output_directory}/meshes/{mesh_id}.ply")
                 raise Exception(f"Mesh {mesh_id} contains no faces")
@@ -495,3 +768,22 @@ class Meshify:
                 self.output_directory + "/meshes", self.output_directory + "/metrics"
             )
             analyze.analyze()
+
+
+# %%
+if __name__ == "__main__":
+    m = Meshify(
+        input_path="/nrs/cellmap/zubovy/symlinks_mito/jrc_c-elegans-bw-1/jrc_c-elegans-bw-1.zarr/s0",
+        output_directory="/nrs/cellmap/ackermand/new_meshes/meshes/single_resolution/c-elegans/jrc_c-elegans-bw-1/mito_highres_fixed_edge",
+        read_write_block_shape_pixels=[448, 448, 448],
+        do_analysis=False,
+        use_fixed_edge_simplification=True,
+    )
+    # %%
+    dirname = f"{m.output_directory}/tmp_chunked/"
+    os.makedirs(dirname, exist_ok=True)
+    m.dirname = dirname
+    id = 2761737217
+    m._assemble_mesh(id)
+
+# %%
