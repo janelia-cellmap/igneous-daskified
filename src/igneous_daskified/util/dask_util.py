@@ -53,10 +53,14 @@ def create_blocks(
         for dim_2 in range(roi.get_begin()[2], roi.get_end()[2], block_size[2]):
             for dim_1 in range(roi.get_begin()[1], roi.get_end()[1], block_size[1]):
                 for dim_0 in range(roi.get_begin()[0], roi.get_end()[0], block_size[0]):
-                    block_roi = Roi((dim_0, dim_1, dim_2), block_size).intersect(roi)
+                    block_roi = Roi(
+                        (dim_0, dim_1, dim_2), block_size
+                    )  # .intersect(roi)
                     if padding:
                         block_roi = block_roi.grow(padding, padding)
-                    block_rois[index] = DaskBlock(index, block_roi.intersect(roi))
+                    block_rois[index] = DaskBlock(
+                        index, block_roi
+                    )  # dont want to intersect edge of roi here since will give holes
                     index += 1
         if index < len(block_rois):
             block_rois[index:] = []
