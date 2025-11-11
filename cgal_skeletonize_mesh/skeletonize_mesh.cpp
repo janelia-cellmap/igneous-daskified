@@ -110,7 +110,18 @@ int main(int argc, char* argv[])
   }
 
   Skeleton skeleton;
-  CGAL::extract_mean_curvature_flow_skeleton(mesh, skeleton);
+
+  // Create MCF skeletonization object with explicit parameters
+  typedef CGAL::Mean_curvature_flow_skeletonization<Polyhedron> MCF_Skel;
+  MCF_Skel mcs(mesh);
+
+  // Tweak parameters to try to keep the skeleton inside
+  mcs.set_is_medially_centered(true);              // redundant with defaults, but explicit
+  mcs.set_medially_centered_speed_tradeoff(0.3);   // > default .3 worked well
+  mcs.set_quality_speed_tradeoff(0.5);             // > default .5 worked well
+
+  mcs.contract_until_convergence();
+  mcs.convert_to_skeleton(skeleton);
   
   // Output all the edges of the skeleton.
   if (boost::num_vertices(skeleton) == 0)
