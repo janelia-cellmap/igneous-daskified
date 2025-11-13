@@ -1,3 +1,4 @@
+# %%
 """
 Blockwise -> Merge -> Seam Denoise -> Global Simplify
 
@@ -39,6 +40,54 @@ try:
     from pyfqmr import Simplify
 except Exception as e:
     raise RuntimeError("pyfqmr is required. Install with `pip install pyfqmr`.") from e
+
+
+def pymeshlab_simplify(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    target_faces: int,
+    aggressiveness: float = 0.3,
+    preserve_border: bool = True,
+    preserve_topology: bool = True,
+    verbose: bool = False,
+):
+    """
+    Simplify using PyMeshLab's quadric edge collapse decimation.
+    More robust than pyfqmr, better at avoiding degeneracies.
+    """
+    import pymeshlab
+
+    ms = pymeshlab.MeshSet()
+    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=verts, face_matrix=faces))
+
+    if verbose:
+        print(
+            f"Before: {ms.current_mesh().vertex_number()} verts, "
+            f"{ms.current_mesh().face_number()} faces"
+        )
+
+    # Quadric edge collapse decimation
+    ms.meshing_decimation_quadric_edge_collapse(
+        targetfacenum=target_faces,
+        preserveboundary=preserve_border,
+        preservetopology=preserve_topology,  # Prevents mesh from becoming non-manifold
+        preservenormal=True,
+        boundaryweight=np.inf,
+        planarquadric=True,  # Better preservation of planar regions
+        qualitythr=aggressiveness,  # Only collapse edges that don't hurt quality too much
+    )
+
+    # Cleanup any artifacts
+    ms.meshing_remove_duplicate_faces()
+    ms.meshing_remove_duplicate_vertices()
+    ms.meshing_remove_unreferenced_vertices()
+
+    m = ms.current_mesh()
+
+    if verbose:
+        print(f"After: {m.vertex_number()} verts, {m.face_number()} faces")
+
+    return m.vertex_matrix().astype(np.float64), m.face_matrix().astype(np.int32)
 
 
 def fqmr_simplify(
@@ -561,13 +610,15 @@ def remove_boundary_vertices(
     return repair_cleanup(new_mesh)
 
 
-def simplify_block_preserve_edges(
+def simplify_mesh(
     mesh: trimesh.Trimesh,
     target_reduction: float,
     voxel_size: float,
     block_size: np.ndarray = None,
-    aggressiveness: int = 7,
+    aggressiveness: float = 0.3,
     verbose: bool = False,
+    use_pymeshlab: bool = True,
+    fix_edges=False,
 ) -> trimesh.Trimesh:
     # Remove positive-face boundary vertices first
     if verbose:
@@ -581,14 +632,37 @@ def simplify_block_preserve_edges(
         return mesh
 
     target_faces = int(max(4, (1 - target_reduction) * F.shape[0]))
-    v_out, f_out = fqmr_simplify(
-        mesh.vertices,
-        F,
-        target_faces=target_faces,
-        preserve_border=True,  # No borders to preserve since we removed them all
-        aggressiveness=aggressiveness,
-        verbose=False,  # pyfqmr verbose is too noisy
-    )
+    if use_pymeshlab:
+        if verbose:
+            print(
+                f"  Simplifying block with PyMeshLab to {target_faces} faces ({(1 - target_reduction)*100:.1f}% of {F.shape[0]})"
+            )
+        v_out, f_out = pymeshlab_simplify(
+            mesh.vertices,
+            F,
+            target_faces=target_faces,
+            aggressiveness=0.3,
+            preserve_border=(
+                True if fix_edges else False
+            ),  # No borders to preserve since we removed them all
+            preserve_topology=True,
+            verbose=False,
+        )
+    else:
+        if verbose:
+            print(
+                f"  Simplifying block with pyfqmr to {target_faces} faces ({(1 - target_reduction)*100:.1f}% of {F.shape[0]})"
+            )
+        v_out, f_out = fqmr_simplify(
+            mesh.vertices,
+            F,
+            target_faces=target_faces,
+            preserve_border=(
+                True if fix_edges else False
+            ),  # No borders to preserve since we removed them all
+            aggressiveness=aggressiveness,
+            verbose=False,  # pyfqmr verbose is too noisy
+        )
     m2 = trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
     return repair_cleanup(m2)
 
@@ -1055,3 +1129,5 @@ if __name__ == "__main__":
 
             traceback.print_exc()
         sys.exit(1)
+
+# %%

@@ -23,6 +23,7 @@ from igneous_daskified.process.downsample_numba import (
 import trimesh
 import json
 from funlib.geometry import Coordinate
+import pymeshlab
 
 # import igneous_daskified.process.fixed_edge_meshes
 # from importlib import reload
@@ -38,11 +39,7 @@ logger = logging.getLogger(__name__)
 # Import fixed edge mesh utilities
 try:
     from igneous_daskified.process.fixed_edge_meshes import (
-        fqmr_simplify,
-        repair_cleanup,
-        weld_vertices,
-        denoise_seams_inplace,
-        simplify_block_preserve_edges,
+        simplify_mesh,
     )
 
     FIXED_EDGE_AVAILABLE = True
@@ -85,7 +82,7 @@ class Meshify:
         num_workers: int = 10,
         remove_smallest_components: bool = True,
         n_smoothing_iter: int = 10,
-        default_aggressiveness: int = 7,
+        default_aggressiveness: int = 0.3,
         check_mesh_validity: bool = True,  # useful if meshes will be used for things other than visualization
         do_simplification: bool = True,
         do_analysis: bool = True,
@@ -112,7 +109,7 @@ class Meshify:
             num_workers (int): Number of workers to use for processing. Default is 10.
             remove_smallest_components (bool): Whether to remove the smallest components from the mesh. Default is True.
             n_smoothing_iter (int): Number of smoothing iterations to apply to the mesh. Default is 10.
-            default_aggressiveness (int): Default aggressiveness for mesh simplification. Default is 7.
+            default_aggressiveness (int): Default aggressiveness for mesh simplification. Default is .3.
             check_mesh_validity (bool): Whether to check the validity of the mesh. This is useful most useful if doing downstream analysis. Default is True.
             do_simplification (bool): Whether to apply mesh simplification. Default is True.
             do_analysis (bool): Whether to perform analysis on the meshes. Default is True.
@@ -183,6 +180,7 @@ class Meshify:
                 "Fixed edge simplification requested but dependencies not available. "
                 "Ensure fixed_edge_meshes.py is present and pyfqmr is installed (`pip install pyfqmr`)."
             )
+
         self.fixed_edge_merge_weld_epsilon = fixed_edge_merge_weld_epsilon
         self.fixed_edge_seam_angle_deg = fixed_edge_seam_angle_deg
         self.fixed_edge_k_ring = fixed_edge_k_ring
@@ -257,15 +255,14 @@ class Meshify:
                 ]
 
                 # Simplify with positive-face boundary removal
-                mesh_tri_simplified = simplify_block_preserve_edges(
+                mesh_tri_simplified = simplify_mesh(
                     mesh_tri,
                     voxel_size=self.output_voxel_size_funlib,
                     target_reduction=stage_1_reduction,
                     block_size=block_size_world,
-                    aggressiveness=max(
-                        0, self.default_aggressiveness - 1
-                    ),  # be less aggressive in first pass
+                    aggressiveness=self.default_aggressiveness,
                     verbose=False,
+                    fix_edges=True,
                 )
                 mesh_tri_simplified.vertices += block_offset[::-1]
 
@@ -320,48 +317,67 @@ class Meshify:
         target_reduction=0.99,
         n_smoothing_iter=10,
         remove_smallest_components=True,
-        aggressiveness=7,
+        aggressiveness=0.3,
         do_simplification=True,
         check_mesh_validity=True,
     ):
 
         def get_cleaned_simplified_and_smoothed_mesh(
-            mesh, target_count, aggressiveness, do_simplification
+            mesh, target_reduction, aggressiveness, do_simplification
         ):
             if do_simplification:
                 # logger.warning("simplifying mesh")
-                simplified_mesh = fast_simplification.simplify_mesh(
-                    mesh, target_count=target_count, agg=aggressiveness, verbose=False
+                simplified_mesh = simplify_mesh(
+                    mesh,
+                    voxel_size=None,
+                    target_reduction=target_reduction,
+                    aggressiveness=aggressiveness,
+                    verbose=False,
+                    fix_edges=False,
                 )
+
+                # do taubin smoothing inside simplify_mesh now
+
+                # simplified_mesh = fast_simplification.simplify_mesh(
+                #     mesh, target_count=target_count, agg=aggressiveness, verbose=False
+                # )
                 # logger.warning("simplified")
             else:
                 simplified_mesh = mesh
             del mesh
+
             if n_smoothing_iter > 0:
-                simplified_mesh = simplified_mesh.smooth_taubin(n_smoothing_iter)
+                ms = pymeshlab.MeshSet()
+                ms.add_mesh(
+                    pymeshlab.Mesh(
+                        vertex_matrix=simplified_mesh.vertices,
+                        face_matrix=simplified_mesh.faces,
+                    )
+                )
+
+                # Apply Taubin smoothing
+                ms.apply_coord_taubin_smoothing(
+                    lambda_=0.5,  # Smoothing factor
+                    mu=-0.53,  # Inflation factor
+                    stepsmoothnum=n_smoothing_iter,  # Number of iterations
+                )
+                m = ms.current_mesh()
+                simplified_mesh = trimesh.Trimesh(
+                    vertices=m.vertex_matrix(), faces=m.face_matrix()
+                )
             # logger.warning("smoothed")
             # clean mesh, this helps ensure watertightness, but not guaranteed?
             # if remove_smallest_components:
             if not check_mesh_validity:
-                return (
-                    simplified_mesh.points,
-                    simplified_mesh.faces.reshape(-1, 4)[:, 1:],
-                )
-            vclean, fclean = pymeshfix.clean_from_arrays(
-                simplified_mesh.points,
-                simplified_mesh.faces.reshape(-1, 4)[:, 1:],
+                return simplified_mesh
+            cleaned_mesh = Meshify.repair_mesh_pymeshlab(
+                simplified_mesh.vertices,
+                simplified_mesh.faces,
                 remove_smallest_components=remove_smallest_components,
-                verbose=True,
             )
             del simplified_mesh
-            # logger.warning("cleaned")
-            # else:
-            #     return (
-            #         simplified_mesh.points,
-            #         simplified_mesh.faces.reshape(-1, 4)[:, 1:],
-            #     )
 
-            return vclean, fclean
+            return cleaned_mesh
 
         if remove_smallest_components:
             if type(mesh) != trimesh.base.Trimesh:
@@ -382,35 +398,26 @@ class Meshify:
 
         vertices = mesh.vertices - com
         faces = mesh.faces
+        mesh = trimesh.Trimesh(vertices, faces)
 
         # print(f"Initial mesh has {len(faces)} faces")
-        output_trimesh_mesh = trimesh.Trimesh(vertices, faces)
+        output_trimesh_mesh = mesh.copy()
         # print(f"output mesh")
         if check_mesh_validity and not Meshify.is_mesh_valid(output_trimesh_mesh):
+            # write out failed mesh
+            output_trimesh_mesh.export("failed_mesh.ply")
             raise Exception(
                 f"Initial mesh is not valid, {output_trimesh_mesh.is_winding_consistent=},{output_trimesh_mesh.is_watertight=},{output_trimesh_mesh.volume=}."
             )
 
-        # Create a new column filled with 3s since we need to tell pyvista that each face has 3 vertices in this mesh
-        new_column = np.full((mesh.faces.shape[0], 1), 3)
-
-        # Concatenate the new column with the original array
-        faces = np.concatenate((new_column, mesh.faces), axis=1)
-        mesh = pv.PolyData(vertices, faces[:])
-        # print("polydataed")
-
-        min_faces = 100
-        # simplify mesh
-        target_count = max(int(mesh.n_cells * (1 - target_reduction)), min_faces)
-
         if do_simplification:
             # check to make sure it is actually necessary
-            do_simplification = mesh.n_cells > min_faces
-        vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
-            mesh, target_count, aggressiveness, do_simplification
+            do_simplification = output_trimesh_mesh.faces.shape[0] > 100
+        trimesh_mesh = get_cleaned_simplified_and_smoothed_mesh(
+            mesh, target_reduction, aggressiveness, do_simplification
         )
         # logger.warning(f"got vclean and fclean: len(fclean)={len(fclean)}")
-        trimesh_mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+        min_faces = 100
         retry_simplification_for_validity = False
         if check_mesh_validity:
             if Meshify.is_mesh_valid(trimesh_mesh):
@@ -422,24 +429,27 @@ class Meshify:
         del trimesh_mesh
         # logger.warning(f"trimeshed")
 
-        aggressiveness -= 1
+        aggressiveness -= 0.05
         # initially would redo only if fclean==0, but noticed that sometimes it simplifies weird structures to a single face which isnt good
         # also need to check if mesh is valid after simplification
         while (
-            (len(fclean) < 0.5 * target_count or retry_simplification_for_validity)
-            and aggressiveness >= -1
+            (
+                len(output_trimesh_mesh.faces)
+                < 0.5 * len(output_trimesh_mesh.faces) * (1 - target_reduction)
+                or retry_simplification_for_validity
+            )
+            and aggressiveness >= -0.05
             and do_simplification
         ):
             print("aggressiveness:", aggressiveness)
             # if aggressiveness is <0, then we want to try without simplification
-            vclean, fclean = get_cleaned_simplified_and_smoothed_mesh(
+            trimesh_mesh = get_cleaned_simplified_and_smoothed_mesh(
                 mesh,
-                target_count,
+                target_reduction,
                 aggressiveness,
                 do_simplification=aggressiveness >= 0,
             )
-            aggressiveness -= 1
-            trimesh_mesh = trimesh.Trimesh(vertices=vclean, faces=fclean)
+            aggressiveness -= 0.05
             if check_mesh_validity:
                 if Meshify.is_mesh_valid(trimesh_mesh):
                     output_trimesh_mesh = trimesh_mesh
@@ -452,14 +462,131 @@ class Meshify:
                 f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) had to be processed unsimplified."
             )
 
-        if len(fclean) == 0:
+        if len(output_trimesh_mesh.faces) == 0:
             raise Exception(
-                f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplificaiton."
+                f"Mesh with {output_trimesh_mesh.faces} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplification."
             )
 
         output_trimesh_mesh.vertices += com
         output_trimesh_mesh.fix_normals()
         return output_trimesh_mesh
+
+    @staticmethod
+    def repair_mesh_pymeshlab(
+        vertices,
+        faces,
+        remove_smallest_components=True,
+        max_hole_size=30,
+        verbose=False,
+    ):
+        """
+        Repair mesh using PyMeshLab and return as trimesh.
+
+        Args:
+            vertices: Nx3 array of vertex positions
+            faces: Mx3 array of face indices
+            max_hole_size: Maximum hole size to fill (in number of edges), default 30
+
+        Returns:
+            tuple: (vertices, faces) - repaired or original if skipped
+        """
+        import pymeshlab
+        import trimesh
+        import time
+        from datetime import datetime
+
+        def print_with_time(msg, verbose=verbose):
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if verbose:
+                print(f"[{timestamp}] {msg}")
+
+        t_start = time.time()
+        print_with_time(
+            f"Starting mesh repair with pymeshlab ({len(faces):,} faces)..."
+        )
+
+        # Create MeshSet and add mesh
+        t0 = time.time()
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(vertex_matrix=vertices, face_matrix=faces))
+        print_with_time(f"Added mesh to pymeshlab ({time.time() - t0:.2f}s)")
+
+        # Repair pipeline
+        t0 = time.time()
+        ms.meshing_remove_duplicate_faces()
+        ms.meshing_remove_duplicate_vertices()
+        ms.meshing_remove_unreferenced_vertices()
+        print_with_time(
+            f"Removed duplicates and unreferenced vertices ({time.time() - t0:.2f}s)"
+        )
+
+        # Repair non-manifold edges (split first, then remove)
+        t0 = time.time()
+        ms.meshing_repair_non_manifold_edges(method="Split Vertices")
+        ms.meshing_repair_non_manifold_edges(method="Remove Faces")
+        print_with_time(f"Repaired non-manifold edges ({time.time() - t0:.2f}s)")
+
+        # Close holes
+        t0 = time.time()
+        ms.meshing_close_holes(maxholesize=max_hole_size)
+        print_with_time(
+            f"Closed holes (max size {max_hole_size}) ({time.time() - t0:.2f}s)"
+        )
+
+        # Repair non-manifold vertices
+        t0 = time.time()
+        ms.meshing_repair_non_manifold_vertices(vertdispratio=0)
+        print_with_time(f"Repaired non-manifold vertices ({time.time() - t0:.2f}s)")
+
+        # Keep only largest component - API changed between pymeshlab versions
+        t0 = time.time()
+        n_components_before = ms.current_mesh().face_number()
+        if remove_smallest_components:
+            try:
+                # Try new API (>= 2022.2) with PercentageValue
+                if hasattr(pymeshlab, "PercentageValue"):
+                    ms.meshing_remove_connected_component_by_diameter(
+                        mincomponentdiag=pymeshlab.PercentageValue(0)
+                    )
+                elif hasattr(pymeshlab, "Percentage"):
+                    ms.meshing_remove_connected_component_by_diameter(
+                        mincomponentdiag=pymeshlab.Percentage(0)
+                    )
+                else:
+                    # Old API - plain number
+                    ms.meshing_remove_connected_component_by_diameter(
+                        mincomponentdiag=0
+                    )
+            except Exception as e:
+                print_with_time(
+                    f"Could not remove small components: {e}. Skipping component removal."
+                )
+            n_components_after = ms.current_mesh().face_number()
+            print_with_time(
+                f"Component filtering: {n_components_before:,} -> {n_components_after:,} faces ({time.time() - t0:.2f}s)"
+            )
+
+        # Fix face orientation
+        t0 = time.time()
+        ms.meshing_re_orient_faces_coherently()
+        print_with_time(f"Re-oriented faces ({time.time() - t0:.2f}s)")
+
+        # Convert back - extract from PyMeshLab's internal format
+        t0 = time.time()
+        m = ms.current_mesh()
+        print_with_time(f"Got current_mesh reference ({time.time() - t0:.2f}s)")
+
+        # Extract vertex and face matrices (this is the slow part for large meshes)
+        t0 = time.time()
+        verts_out = m.vertex_matrix()
+        print_with_time(f"Extracted vertex matrix ({time.time() - t0:.2f}s)")
+
+        t0 = time.time()
+        faces_out = m.face_matrix()
+        print_with_time(f"Extracted face matrix ({time.time() - t0:.2f}s)")
+
+        print_with_time(f"Total repair time: {time.time() - t_start:.2f}s")
+        return trimesh.Trimesh(vertices=verts_out, faces=faces_out)
 
     def _assemble_mesh(self, mesh_id):
 
@@ -507,7 +634,7 @@ class Meshify:
         num_blocks = len(block_meshes)  # Store for later use
 
         if len(block_meshes) > 1:
-            print("concatenating meshes")
+            print(f"concatenating {len(block_meshes)} meshes")
             try:
                 mesh = Meshify.my_cloudvolume_concatenate(*block_meshes)
             except Exception as e:
@@ -520,6 +647,7 @@ class Meshify:
                 self.read_write_block_shape_pixels * self.base_voxel_size_funlib
             )
             print("deduplicating chunk boundaries")
+            print(f"chunk size: {chunk_size}, offset: {self.total_roi.offset}")
             mesh = mesh.deduplicate_chunk_boundaries(
                 chunk_size=chunk_size[::-1],
                 offset=self.total_roi.offset[::-1],
@@ -569,46 +697,12 @@ class Meshify:
 
         if self.check_mesh_validity:
             try:
-                mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
-
-                # Add defensive checks before pymeshfix to prevent segfaults
-                if len(mesh.faces) == 0:
-                    logger.warning(
-                        f"Mesh {mesh_id} has no faces, skipping pymeshfix cleanup"
-                    )
-                elif len(mesh.vertices) == 0:
-                    logger.warning(
-                        f"Mesh {mesh_id} has no vertices, skipping pymeshfix cleanup"
-                    )
-                elif len(mesh.faces) > 10_000_000:
-                    logger.warning(
-                        f"Mesh {mesh_id} has {len(mesh.faces)} faces (>10M), skipping pymeshfix to avoid segfault"
-                    )
-                else:
-                    # further cleanup attempts
-                    print("cleaning mesh")
-                    # Ensure correct dtypes to prevent memory corruption
-                    vertices_clean = np.ascontiguousarray(
-                        mesh.vertices, dtype=np.float64
-                    )
-                    faces_clean = np.ascontiguousarray(mesh.faces, dtype=np.int32)
-                    # write out pre-cleaned mesh for debugging
-                    # _ = mesh.export(
-                    #     f"{self.output_directory}/meshes/{mesh_id}_precleaned.ply"
-                    # )
-                    try:
-                        vclean, fclean = pymeshfix.clean_from_arrays(
-                            vertices_clean,
-                            faces_clean,
-                            remove_smallest_components=self.remove_smallest_components,
-                        )
-                        print("cleaned mesh")
-                        mesh = trimesh.Trimesh(vclean, fclean)
-                    except Exception as pymeshfix_error:
-                        logger.warning(
-                            f"pymeshfix failed for mesh {mesh_id}: {pymeshfix_error}. Continuing with uncleaned mesh."
-                        )
-                        # Continue with the original mesh if pymeshfix fails
+                # mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
+                mesh = Meshify.repair_mesh_pymeshlab(
+                    mesh.vertices,
+                    mesh.faces,
+                    remove_smallest_components=self.remove_smallest_components,
+                )
             except Exception as e:
                 raise Exception(f"{mesh_id} failed, with error: {e}")
 
@@ -629,53 +723,6 @@ class Meshify:
                     self.do_simplification,
                     self.check_mesh_validity,
                 )
-            # # If using fixed edge approach and have already done per-block simplification,
-            # # do a final global simplification without border constraints
-            # if (
-            #     self.use_fixed_edge_simplification
-            #     and self.do_simplification
-            #     and num_blocks > 1
-            # ):
-            #     # Ensure mesh is trimesh format
-            #     if not isinstance(mesh, trimesh.Trimesh):
-            #         mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
-
-            #     # Global simplification with no border constraints
-            #     stage_2_reduction, _ = staged_reductions(
-            #         self.target_reduction,
-            #         self.stage_1_reduction_fraction,
-            #         self.stage_2_reduction_fraction,
-            #     )
-            #     target_faces = int(max(4, len(mesh.faces) * (1 - stage_2_reduction)))
-            #     v_out, f_out = fqmr_simplify(
-            #         mesh.vertices,
-            #         mesh.faces,
-            #         target_faces=target_faces,
-            #         preserve_border=False,  # Important: no fixed vertices for global pass
-            #         aggressiveness=self.default_aggressiveness,
-            #         verbose=False,
-            #     )
-            #     mesh = trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
-            #     mesh = repair_cleanup(mesh)
-
-            #     # Apply Taubin smoothing if requested (using the constrained version with all vertices)
-            #     if self.n_smoothing_iter > 0:
-            #         # Apply Taubin smoothing to all vertices
-            #         from igneous_daskified.process.fixed_edge_meshes import (
-            #             taubin_constrained,
-            #         )
-
-            #         all_vertices = np.arange(len(mesh.vertices), dtype=np.int32)
-            #         taubin_constrained(
-            #             mesh,
-            #             all_vertices,
-            #             lamb=0.5,
-            #             mu=-0.53,
-            #             iterations=self.n_smoothing_iter,
-            #             verbose=False,
-            #         )
-            # else:
-            # Use standard simplification and smoothing
             else:
                 mesh = Meshify.simplify_and_smooth_mesh(
                     mesh,
@@ -783,7 +830,7 @@ if __name__ == "__main__":
     dirname = f"{m.output_directory}/tmp_chunked/"
     os.makedirs(dirname, exist_ok=True)
     m.dirname = dirname
-    id = 2761737217
+    id = "2761737217"
     m._assemble_mesh(id)
 
 # %%

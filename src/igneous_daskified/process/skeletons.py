@@ -32,6 +32,8 @@ class Skeletonize:
         num_workers: int = 10,
         min_branch_length_nm: float = 100,
         simplification_tolerance_nm: float = 50,
+        base_loop_subdivision_iterations: int = 1,
+        neuroglancer_format: bool = False,
     ):
         """
         Args:
@@ -40,43 +42,202 @@ class Skeletonize:
             num_workers (int): Number of workers to use for parallel processing.
             min_branch_length_nm (float): Minimum branch length in nanometers for pruning.
             simplification_tolerance_nm (float): Tolerance for simplification in nanometers.
+            base_loop_subdivision_iterations (int): Number of base loop subdivision iterations to apply.
+            neuroglancer_format (bool): Whether the input mesh is in neuroglancer format.
         """
         self.input_directory = input_directory
         self.output_directory = output_directory
         self.num_workers = num_workers
         self.min_branch_length_nm = min_branch_length_nm
         self.simplification_tolerance_nm = simplification_tolerance_nm
+        self.base_loop_subdivision_iterations = base_loop_subdivision_iterations
+        self.neuroglancer_format = neuroglancer_format
 
     @staticmethod
     def cgal_skeletonize_mesh(
-        input_file: str, output_file: str, timeout_seconds: int = 120
+        input_file: str,
+        output_file: str,
+        base_loop_subdivision_iterations: int = 1,
+        neuroglancer_format: bool = False,
+        timeout_seconds: int = 120,
     ) -> None:
+        import tempfile
+        import DracoPy
+
         root = Path(__file__).resolve().parents[3]
         exe = root / "cgal_skeletonize_mesh" / "skeletonize_mesh"
+        timeout_seconds = timeout_seconds * 4 ** (
+            base_loop_subdivision_iterations - 1
+        )  # Seems to take approximately 4 x as long with each additional subdivision
+
+        # Check if the input file is Draco-compressed
+        temp_ply_path = None
+        actual_input_file = input_file
+
+        if neuroglancer_format:
+            # Check if file is Draco-compressed by reading magic bytes
+            with open(input_file, "rb") as f:
+                magic = f.read(5)
+
+            if magic == b"DRACO":
+                logger.info(
+                    f"Detected Draco-compressed mesh, decompressing to temporary PLY file"
+                )
+                # Decompress Draco to temporary PLY file
+                with open(input_file, "rb") as f:
+                    draco_data = f.read()
+
+                mesh_obj = DracoPy.decode_buffer_to_mesh(draco_data)
+
+                # Read vertex_quantization_bits from info file
+                import json
+                vertex_quantization_bits = 10  # default
+                info_file = os.path.join(os.path.dirname(input_file), "info")
+                if os.path.exists(info_file):
+                    try:
+                        with open(info_file, 'r') as f:
+                            info = json.load(f)
+                            vertex_quantization_bits = info.get("vertex_quantization_bits", 10)
+                            logger.info(f"Read vertex_quantization_bits={vertex_quantization_bits} from info file")
+                    except Exception as e:
+                        logger.warning(f"Failed to read info file, using default vertex_quantization_bits=10: {e}")
+
+                # Read transform info from .index file if it exists
+                chunk_shape = [1.0, 1.0, 1.0]  # default
+                grid_origin = [0.0, 0.0, 0.0]  # default
+                vertex_offsets = [0.0, 0.0, 0.0]  # default
+                lod = 0  # Assuming single resolution at LOD 0
+
+                index_file = input_file + ".index"
+                if os.path.exists(index_file):
+                    import struct
+
+                    try:
+                        with open(index_file, "rb") as f:
+                            # Read chunk_shape (3 floats)
+                            chunk_shape = list(struct.unpack("<3f", f.read(12)))
+                            # Read grid_origin (3 floats)
+                            grid_origin = list(struct.unpack("<3f", f.read(12)))
+                            # Read num_lods (uint32)
+                            num_lods = struct.unpack("<I", f.read(4))[0]
+                            # Read lod_scales (num_lods floats)
+                            lod_scales = struct.unpack(
+                                f"<{num_lods}f", f.read(4 * num_lods)
+                            )
+                            # Read vertex_offsets (3 * num_lods floats)
+                            all_vertex_offsets = struct.unpack(
+                                f"<{3 * num_lods}f", f.read(12 * num_lods)
+                            )
+                            # Use LOD 0 offsets (first 3 values)
+                            vertex_offsets = list(all_vertex_offsets[0:3])
+                            logger.info(
+                                f"Read from .index: chunk_shape={chunk_shape}, grid_origin={grid_origin}, vertex_offsets={vertex_offsets}"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to read .index file, using defaults: {e}"
+                        )
+
+                # Apply full neuroglancer coordinate transform
+                # Formula: grid_origin[j] + vertex_offsets[lod,j] + chunk_shape[j] * (2**lod) * (fragmentPosition[j] + x / ((2**vertex_quantization_bits)-1))
+                # DracoPy gives us quantized integer vertex positions that need to be normalized
+                import numpy as np
+
+                vertices = np.array(mesh_obj.points, dtype=np.float32)
+                print(
+                    "Min and max vertex coords (raw):",
+                    np.min(vertices, axis=0),
+                    np.max(vertices, axis=0),
+                )
+                print(f"chunk_shape={chunk_shape}, vertex_offsets={vertex_offsets}, grid_origin={grid_origin}")
+                print(f"vertex_quantization_bits={vertex_quantization_bits}")
+
+                # Normalize quantized positions to [0,1] range
+                # x / ((2**vertex_quantization_bits) - 1)
+                quantization_max = (2 ** vertex_quantization_bits) - 1
+                vertices /= quantization_max
+
+                # fragmentPosition is [0,0,0] for single-fragment meshes, so we skip that term
+
+                # Scale by chunk_shape * (2**lod)
+                lod_scale = 2**lod
+                vertices *= np.array(chunk_shape, dtype=np.float32) * lod_scale
+
+                # Add vertex_offsets
+                vertices += np.array(vertex_offsets, dtype=np.float32)
+
+                # Add grid_origin
+                vertices += np.array(grid_origin, dtype=np.float32)
+
+                print(
+                    "Min and max vertex coords (transformed):",
+                    np.min(vertices, axis=0),
+                    np.max(vertices, axis=0),
+                )
+
+                # Create temporary PLY file
+                temp_ply_fd, temp_ply_path = tempfile.mkstemp(suffix=".ply", text=True)
+
+                # Write PLY
+                num_vertices = len(vertices)
+                num_faces = len(mesh_obj.faces)
+
+                with os.fdopen(temp_ply_fd, "w") as temp_ply:
+                    temp_ply.write("ply\n")
+                    temp_ply.write("format ascii 1.0\n")
+                    temp_ply.write(f"element vertex {num_vertices}\n")
+                    temp_ply.write("property float x\n")
+                    temp_ply.write("property float y\n")
+                    temp_ply.write("property float z\n")
+                    temp_ply.write(f"element face {num_faces}\n")
+                    temp_ply.write("property list uchar int vertex_indices\n")
+                    temp_ply.write("end_header\n")
+
+                    for vertex in vertices:
+                        temp_ply.write(f"{vertex[0]} {vertex[1]} {vertex[2]}\n")
+
+                    for face in mesh_obj.faces:
+                        temp_ply.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+
+                actual_input_file = temp_ply_path
+                neuroglancer_format = False  # Now it's a PLY file
+                logger.info(
+                    f"Decompressed mesh: {num_vertices} vertices, {num_faces} faces"
+                )
 
         max_iter = 5
-        for loop_subdiv in range(1, max_iter + 1):
-            cmd = [str(exe), input_file, output_file, str(loop_subdiv)]
-            try:
-                subprocess.run(cmd, check=True, timeout=timeout_seconds)
-                return  # success!
-            except subprocess.TimeoutExpired as e:
-                if loop_subdiv == max_iter:
+        try:
+            for loop_subdiv in range(base_loop_subdivision_iterations, max_iter + 1):
+                cmd = [str(exe), actual_input_file, output_file, str(loop_subdiv)]
+                if neuroglancer_format:
+                    cmd.append("--neuroglancer_format")
+                try:
+                    subprocess.run(cmd, check=True, timeout=timeout_seconds)
+                    return  # success!
+                except subprocess.TimeoutExpired as e:
+                    if loop_subdiv == max_iter:
+                        raise Exception(
+                            f"Skeletonization timed out after {timeout_seconds}s "
+                            f"with {max_iter} loop_subdivisions"
+                        ) from e
+                    print(
+                        f"Timeout at iter={loop_subdiv}; retrying with iter={loop_subdiv+1}"
+                    )
+                except subprocess.CalledProcessError as e:
                     raise Exception(
-                        f"Skeletonization timed out after {timeout_seconds}s "
-                        f"with {max_iter} loop_subdivisions"
+                        f"Error skeletonizing {actual_input_file}; exit status {e.returncode}"
                     ) from e
-                print(
-                    f"Timeout at iter={loop_subdiv}; retrying with iter={loop_subdiv+1}"
-                )
-            except subprocess.CalledProcessError as e:
-                raise Exception(
-                    f"Error skeletonizing {input_file}; exit status {e.returncode}"
-                ) from e
-            except FileNotFoundError as e:
-                raise Exception(
-                    f"Could not find or execute skeletonizer at {exe}"
-                ) from e
+                except FileNotFoundError as e:
+                    raise Exception(
+                        f"Could not find or execute skeletonizer at {exe}"
+                    ) from e
+        finally:
+            # Clean up temporary file if created
+            if temp_ply_path is not None:
+                try:
+                    os.unlink(temp_ply_path)
+                except Exception:
+                    pass
 
     @staticmethod
     def read_skeleton_from_custom_file(filename):
@@ -106,7 +267,12 @@ class Skeletonize:
         input_file = f"{self.input_directory}/{mesh}"
         mesh_id = mesh.split(".")[0]
         output_file = f"{self.output_directory}/cgal/{mesh_id}.txt"
-        Skeletonize.cgal_skeletonize_mesh(input_file, output_file)
+        Skeletonize.cgal_skeletonize_mesh(
+            input_file,
+            output_file,
+            self.base_loop_subdivision_iterations,
+            self.neuroglancer_format,
+        )
 
     def process_custom_skeleton_df(self, df):
         results_df = []
@@ -163,7 +329,23 @@ class Skeletonize:
 
     def get_skeletons_from_meshes(self):
         os.makedirs(f"{self.output_directory}/cgal", exist_ok=True)
-        meshes = os.listdir(self.input_directory)
+        all_files = os.listdir(self.input_directory)
+
+        if self.neuroglancer_format:
+            # For neuroglancer format, only use base names of files with .index extension
+            meshes = []
+            for f in all_files:
+                if f.endswith(".index"):
+                    base_name = f.rsplit(".index", 1)[0]
+                    meshes.append(base_name)
+
+            logger.info(
+                f"Found {len(meshes)} neuroglancer mesh files (filtered from {len(all_files)} total files)"
+            )
+        else:
+            # For other formats (like PLY), use all files
+            meshes = all_files
+
         # meshes = [f"{i}.ply" for i in range(1, 1000)]
         b = db.from_sequence(
             meshes,
