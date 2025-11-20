@@ -6,32 +6,10 @@ To compile this code:
 
 Also run `conda install conda-forge::cgal` and `conda install omnia::eigen3`.
 
-Add:
-```
-# Point at your Conda environment first
-list(INSERT CMAKE_PREFIX_PATH 0 "$ENV{CONDA_PREFIX}")
-set(CGAL_USE_PKGCONFIG OFF CACHE BOOL "" FORCE)
 
-# Find CGAL
-find_package(CGAL 6.0 REQUIRED COMPONENTS Core)
-```
-and 
-```
-# Eigen3 integration
-find_package(Eigen3 3.3.7 REQUIRED NO_MODULE)
-include(CGAL_Eigen3_support)   # Defines CGAL::Eigen3_support
-```
-and
-```
-# Link in Eigen support
-target_link_libraries(skeletonize_mesh
-  PRIVATE
-    CGAL::Eigen3_support
-)
-```
-to CMakeLists.txt.
-
-
-
-cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" -DCGAL_USE_PKGCONFIG=OFF .
-make
+cd /path/to/cgal_skeletonize_mesh
+rm -f CMakeCache.txt
+rm -rf CMakeFiles
+rm -f Makefile cmake_install.cmake
+cmake -S . -B . -DCMAKE_PREFIX_PATH="$CONDA_PREFIX"
+make -j$(nproc)

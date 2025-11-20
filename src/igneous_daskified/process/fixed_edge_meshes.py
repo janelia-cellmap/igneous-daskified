@@ -29,6 +29,7 @@ import os
 import sys
 import time
 from pathlib import Path
+import pymeshlab
 
 import numpy as np
 import trimesh
@@ -55,10 +56,9 @@ def pymeshlab_simplify(
     Simplify using PyMeshLab's quadric edge collapse decimation.
     More robust than pyfqmr, better at avoiding degeneracies.
     """
-    import pymeshlab
 
     ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=verts, face_matrix=faces))
+    ms.add_mesh(pymeshlab.Mesh(verts, faces))
 
     if verbose:
         print(
@@ -624,7 +624,6 @@ def simplify_mesh(
     if verbose:
         print(f"  Removing positive-face boundary vertices...")
     mesh = remove_boundary_vertices(mesh, voxel_size, block_size, verbose=verbose)
-
     F = mesh.faces
     if len(F) == 0:
         if verbose:
@@ -646,7 +645,7 @@ def simplify_mesh(
                 True if fix_edges else False
             ),  # No borders to preserve since we removed them all
             preserve_topology=True,
-            verbose=False,
+            verbose=verbose,
         )
     else:
         if verbose:

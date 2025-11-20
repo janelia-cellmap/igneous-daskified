@@ -1,28 +1,21 @@
 # %%
-import fast_simplification
-from igneous_daskified.process.analyze_meshes import AnalyzeMeshes
-from funlib.persistence import open_ds
-from funlib.persistence.arrays.datasets import _read_attrs
-from funlib.geometry import Roi
+from funlib.persistence.arrays.datasets import _read_attrs, open_ds
+from funlib.geometry import Roi, Coordinate
 import numpy as np
 import os
 import logging
-from funlib.geometry import Roi
 from zmesh import Mesher
 from zmesh import Mesh as Zmesh
 import pandas as pd
 from igneous_daskified.util import dask_util, io_util
 import dask.bag as db
 from cloudvolume.mesh import Mesh as CloudVolumeMesh
-import pyvista as pv
-import pymeshfix
 import shutil
 from igneous_daskified.process.downsample_numba import (
     downsample_labels_3d_suppress_zero,
 )
 import trimesh
 import json
-from funlib.geometry import Coordinate
 import pymeshlab
 
 # import igneous_daskified.process.fixed_edge_meshes
@@ -95,6 +88,7 @@ class Meshify:
         fixed_edge_taubin_iters: int = 12,
         fixed_edge_taubin_lambda: float = 0.5,
         fixed_edge_taubin_mu: float = -0.53,
+        stage_1_reduction_fraction: float = 0.5,
     ):
         """
         Args:
@@ -122,6 +116,7 @@ class Meshify:
             fixed_edge_taubin_iters (int): Taubin smoothing iterations for seam denoising with fixed edge approach. Default is 12.
             fixed_edge_taubin_lambda (float): Taubin smoothing lambda parameter for fixed edge approach. Default is 0.5.
             fixed_edge_taubin_mu (float): Taubin smoothing mu parameter for fixed edge approach. Default is -0.53.
+            stage_1_reduction_fraction (float): Fraction of total reduction to perform in stage 1 of staged simplification. Default is 0.5.
         """
 
         for file_type in [".n5", ".zarr"]:
@@ -188,8 +183,8 @@ class Meshify:
         self.fixed_edge_taubin_lambda = fixed_edge_taubin_lambda
         self.fixed_edge_taubin_mu = fixed_edge_taubin_mu
 
-        self.stage_1_reduction_fraction = 0.5
-        self.stage_2_reduction_fraction = 0.5
+        self.stage_1_reduction_fraction = stage_1_reduction_fraction
+        self.stage_2_reduction_fraction = 1 - self.stage_1_reduction_fraction
 
     @staticmethod
     def my_cloudvolume_concatenate(*meshes):
@@ -235,7 +230,6 @@ class Meshify:
                 # try:
                 # Convert to trimesh
                 mesh_tri = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
-
                 # Calculate target reduction based on target_reduction
                 stage_1_reduction, _ = staged_reductions(
                     self.target_reduction,
@@ -426,7 +420,6 @@ class Meshify:
                 retry_simplification_for_validity = True
         else:
             output_trimesh_mesh = trimesh_mesh
-        del trimesh_mesh
         # logger.warning(f"trimeshed")
 
         aggressiveness -= 0.05
@@ -435,7 +428,7 @@ class Meshify:
         while (
             (
                 len(output_trimesh_mesh.faces)
-                < 0.5 * len(output_trimesh_mesh.faces) * (1 - target_reduction)
+                < 0.5 * len(trimesh_mesh.faces) * (1 - target_reduction)
                 or retry_simplification_for_validity
             )
             and aggressiveness >= -0.05
@@ -457,14 +450,14 @@ class Meshify:
             else:
                 output_trimesh_mesh = trimesh_mesh
 
-        if do_simplification and aggressiveness == -2:
+        if do_simplification and aggressiveness < -0.05:
             logger.warning(
-                f"Mesh with {mesh.n_cells} faces (min_faces={min_faces}) had to be processed unsimplified."
+                f"Mesh with {len(output_trimesh_mesh.faces)} faces (min_faces={min_faces}) had to be processed unsimplified."
             )
 
         if len(output_trimesh_mesh.faces) == 0:
             raise Exception(
-                f"Mesh with {output_trimesh_mesh.faces} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplification."
+                f"Mesh with {len(output_trimesh_mesh.faces)} faces (min_faces={min_faces}) could not be smoothed and cleaned even without simplification."
             )
 
         output_trimesh_mesh.vertices += com
@@ -697,10 +690,13 @@ class Meshify:
 
         if self.check_mesh_validity:
             try:
+                vertices = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
+                faces = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+                del mesh
                 # mesh = trimesh.Trimesh(mesh.vertices, mesh.faces)
                 mesh = Meshify.repair_mesh_pymeshlab(
-                    mesh.vertices,
-                    mesh.faces,
+                    vertices,
+                    faces,
                     remove_smallest_components=self.remove_smallest_components,
                 )
             except Exception as e:
@@ -811,26 +807,79 @@ class Meshify:
         self.assemble_meshes(tmp_chunked_dir)
 
         if self.do_analysis:
+            from igneous_daskified.process.analyze_meshes import AnalyzeMeshes
+
             analyze = AnalyzeMeshes(
                 self.output_directory + "/meshes", self.output_directory + "/metrics"
             )
             analyze.analyze()
 
 
+# # %%
+# if __name__ == "__main__":
+#     m = Meshify(
+#         input_path="/nrs/cellmap/zubovy/symlinks_mito/jrc_c-elegans-bw-1/jrc_c-elegans-bw-1.zarr/s0",
+#         output_directory="/nrs/cellmap/ackermand/new_meshes/meshes/single_resolution/c-elegans/jrc_c-elegans-bw-1/mito_highres_fixed_edge",
+#         read_write_block_shape_pixels=[448, 448, 448],
+#         do_analysis=False,
+#         use_fixed_edge_simplification=True,
+#     )
+#     # %%
+#     dirname = f"{m.output_directory}/tmp_chunked/"
+#     os.makedirs(dirname, exist_ok=True)
+#     m.dirname = dirname
+#     id = "2761737217"
+
+#     # m._assemble_mesh(id)
+
+# # %%
 # %%
-if __name__ == "__main__":
-    m = Meshify(
-        input_path="/nrs/cellmap/zubovy/symlinks_mito/jrc_c-elegans-bw-1/jrc_c-elegans-bw-1.zarr/s0",
-        output_directory="/nrs/cellmap/ackermand/new_meshes/meshes/single_resolution/c-elegans/jrc_c-elegans-bw-1/mito_highres_fixed_edge",
-        read_write_block_shape_pixels=[448, 448, 448],
-        do_analysis=False,
-        use_fixed_edge_simplification=True,
-    )
-    # %%
-    dirname = f"{m.output_directory}/tmp_chunked/"
-    os.makedirs(dirname, exist_ok=True)
-    m.dirname = dirname
-    id = "2761737217"
-    m._assemble_mesh(id)
+# mesher = Mesher([16, 16, 16])  # anisotropy of image
+# print("loading segmentation block")
+# segmentation_block = np.load(
+#     "/groups/cellmap/cellmap/ackermand/new_meshes/scripts/single_resolution/c-elegans/jrc_c-elegans-bw-1/seg_0_55-20251114.133642/50.npy"
+# )
+# print(np.unique(segmentation_block))
+# mesher.mesh(segmentation_block, close=False)
+# for id in mesher.ids():
+#     print("get_mesh for id:", id)
+#     mesh = mesher.get_mesh(id)
+
+#     # try:
+#     # Convert to trimesh
+#     mesh_tri = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
+#     print("got trimesh mesh")
+#     # Simplify with positive-face boundary removal
+#     mesh_tri_simplified = simplify_mesh(
+#         mesh_tri,
+#         voxel_size=[16, 16, 16],
+#         target_reduction=0.9,
+#         block_size=np.array([449, 449, 449]) * np.array([16, 16, 16]),
+#         aggressiveness=0.3,
+#         verbose=True,
+#         fix_edges=True,
+#     )
+#     print("got simplified mesh")
+
+#     # Create a new CloudVolumeMesh with simplified data and write using CloudVolumeMesh format
+#     # This ensures compatibility with CloudVolumeMesh.from_ply() during assembly
+#     mesh_simplified = CloudVolumeMesh(
+#         mesh_tri_simplified.vertices,
+#         mesh_tri_simplified.faces,
+#         normals=None,
+#     )
+
+# %%
+
+mesh = trimesh.load_mesh(
+    "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/cgal_skeletonize_mesh/failed.ply"
+)
+output = Meshify.repair_mesh_pymeshlab(
+    mesh.vertices,
+    mesh.faces,
+)
+output.export(
+    "/groups/scicompsoft/home/ackermand/Programming/igneous-daskified/cgal_skeletonize_mesh/failed_repaired.ply"
+)
 
 # %%

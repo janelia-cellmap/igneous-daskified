@@ -91,16 +91,23 @@ class Skeletonize:
 
                 # Read vertex_quantization_bits from info file
                 import json
+
                 vertex_quantization_bits = 10  # default
                 info_file = os.path.join(os.path.dirname(input_file), "info")
                 if os.path.exists(info_file):
                     try:
-                        with open(info_file, 'r') as f:
+                        with open(info_file, "r") as f:
                             info = json.load(f)
-                            vertex_quantization_bits = info.get("vertex_quantization_bits", 10)
-                            logger.info(f"Read vertex_quantization_bits={vertex_quantization_bits} from info file")
+                            vertex_quantization_bits = info.get(
+                                "vertex_quantization_bits", 10
+                            )
+                            logger.info(
+                                f"Read vertex_quantization_bits={vertex_quantization_bits} from info file"
+                            )
                     except Exception as e:
-                        logger.warning(f"Failed to read info file, using default vertex_quantization_bits=10: {e}")
+                        logger.warning(
+                            f"Failed to read info file, using default vertex_quantization_bits=10: {e}"
+                        )
 
                 # Read transform info from .index file if it exists
                 chunk_shape = [1.0, 1.0, 1.0]  # default
@@ -149,12 +156,14 @@ class Skeletonize:
                     np.min(vertices, axis=0),
                     np.max(vertices, axis=0),
                 )
-                print(f"chunk_shape={chunk_shape}, vertex_offsets={vertex_offsets}, grid_origin={grid_origin}")
+                print(
+                    f"chunk_shape={chunk_shape}, vertex_offsets={vertex_offsets}, grid_origin={grid_origin}"
+                )
                 print(f"vertex_quantization_bits={vertex_quantization_bits}")
 
                 # Normalize quantized positions to [0,1] range
                 # x / ((2**vertex_quantization_bits) - 1)
-                quantization_max = (2 ** vertex_quantization_bits) - 1
+                quantization_max = (2**vertex_quantization_bits) - 1
                 vertices /= quantization_max
 
                 # fragmentPosition is [0,0,0] for single-fragment meshes, so we skip that term
