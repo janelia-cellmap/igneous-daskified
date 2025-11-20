@@ -57,8 +57,26 @@ def cgal_skeletonize_mesh():
     )
     parser.add_argument("input_file", help="Path to your input mesh (e.g. .obj)")
     parser.add_argument("output_file", help="Path to write the skeleton output")
+    # add optional argument base_loop_subdivision_iterations which defaults to 1
+    parser.add_argument(
+        "--base_loop_subdivision_iterations",
+        type=int,
+        default=1,
+        help="Number of base loop subdivision iterations to apply",
+    )
+    # add neuroglancer flag
+    parser.add_argument(
+        "--neuroglancer_format",
+        action="store_true",
+        help="Use neuroglancer format for input mesh",
+    )
     args = parser.parse_args()
-    Skeletonize.cgal_skeletonize_mesh(args.input_file, args.output_file)
+    Skeletonize.cgal_skeletonize_mesh(
+        args.input_file,
+        args.output_file,
+        base_loop_subdivision_iterations=args.base_loop_subdivision_iterations,
+        neuroglancer_format=args.neuroglancer_format,
+    )
 
 
 def skeletonize():
