@@ -27,6 +27,7 @@ dependencies = [
   "funlib.persistence==0.3.0",
   "neuroglancer",
   "numba",
+  "numcodecs==0.13.0",
   "pandas",
   "pyarrow",
   "pybind11-rdp",

@@ -1,3 +1,6 @@
+*.ply
+*.obj
+*.txt
 # cgal
 cgal_skeletonize_mesh/*
 !cgal_skeletonize_mesh/skeletonize_mesh.cpp
