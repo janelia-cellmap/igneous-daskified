@@ -1,6 +1,6 @@
 # igneous-daskified
 
-This repository is for creating meshes nad skeletons from segmentations. 
+This repository is for creating meshes from segmentations, and skeletons from meshes. Much of it the essential mesh code is based on [igneous](https://github.com/seung-lab/igneous), but with an attempt to use dask.
 
 ## Installation
 Install it via `pip install git+https://github.com/janelia-cellmap/igneous-daskified.git@main

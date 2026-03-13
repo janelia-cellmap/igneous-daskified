@@ -116,7 +116,10 @@ class AnalyzeMeshes:
         for metric in metrics:
             df[metric] = 0.0
 
-        ddf = dd.from_pandas(df, npartitions=self.num_workers * 10)
+        ddf = dd.from_pandas(
+            df,
+            npartitions=dask_util.guesstimate_npartitions(len(df), self.num_workers),
+        )
 
         meta = pd.DataFrame(columns=df.columns)
         ddf_out = ddf.map_partitions(self.analyze_mesh_df, meta=meta)

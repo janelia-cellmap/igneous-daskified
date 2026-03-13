@@ -45,10 +45,12 @@ class CustomSkeleton:
         if type(vertex) is not tuple:
             vertex = tuple(vertex)
 
-        if vertex not in self.vertices:
-            self.vertices.append(vertex)
-            if radius:
-                self.radii.append(radius)
+        # if vertex not in self.vertices:
+        self.vertices.append(vertex)
+        if radius:
+            self.radii.append(radius)
+        # else:
+        #    print(f"Vertex {vertex} already in skeleton, not adding")
 
     def add_vertices(self, vertices, radii):
         if radii:
@@ -103,7 +105,7 @@ class CustomSkeleton:
     def find_branchpoints_and_endpoints(graph):
         branchpoints = []
         endpoints = []
-
+        # print("graph.nodes", len(graph.nodes))
         for node in graph.nodes:
             degree = graph.degree[node]
             if degree <= 1:
@@ -157,11 +159,11 @@ class CustomSkeleton:
         branchpoints, _ = CustomSkeleton.find_branchpoints_and_endpoints(g_copy)
         g_copy.remove_nodes_from(branchpoints)
         # if len(branchpoints) > 0:
+
         for component in nx.connected_components(g_copy):
             g_sub = g_copy.subgraph(component)
             polyline = CustomSkeleton.get_polyline_from_subgraph(g_sub, edges)
             polylines.append(polyline)
-
         # if two branchpoints separated by a single edge, teh above would ignore them, so add them back in
         all_edges = []
         for polyline in polylines:
@@ -178,7 +180,6 @@ class CustomSkeleton:
         branchpoints, _ = CustomSkeleton.find_branchpoints_and_endpoints(g)
         current_min_branch_length_nm = np.inf
         current_min_branch_path = None
-
         # for endpoint in endpoints:
         #     for branchpoint in branchpoints:
         #         path_length_nm = nx.shortest_path_length(
@@ -194,6 +195,7 @@ class CustomSkeleton:
         #                 current_min_tick_path = path
 
         polylines_by_vertex_id = CustomSkeleton.get_polylines_from_graph(g)
+
         for polyline_by_vertex_id in polylines_by_vertex_id:
             if (polyline_by_vertex_id[0] in branchpoints) ^ (
                 polyline_by_vertex_id[-1] in branchpoints
@@ -233,9 +235,15 @@ class CustomSkeleton:
         g.add_edges_from(self.edges)
         # add edge weights to the graph where weights are the distances between vertices
         for edge in self.edges:
-            g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
-                np.array(self.vertices[edge[0]]) - np.array(self.vertices[edge[1]])
-            )
+            try:
+                g[edge[0]][edge[1]]["weight"] = np.linalg.norm(
+                    np.array(self.vertices[edge[0]]) - np.array(self.vertices[edge[1]])
+                )
+            except IndexError as e:
+                logger.error(
+                    f"IndexError when trying to access vertices for edge {edge} with vertices length {len(self.vertices)}"
+                )
+                raise e
 
         return g
 
@@ -362,3 +370,6 @@ class CustomSkeleton:
                 decoded_attributes[attr_name] = attribute
         # 5) Package results.
         return vertex_positions, edges
+
+
+# %%
